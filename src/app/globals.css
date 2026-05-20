@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #eef2f8;
+  --foreground: #172033;
+  --muted: #667085;
+  --panel: #ffffff;
+  --line: #d5dce8;
+  --primary: #e11d48;
+  --primary-strong: #be123c;
+  --accent: #0f766e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(225, 29, 72, 0.12), transparent 30rem),
+    linear-gradient(135deg, #f8fafc 0%, var(--background) 48%, #e7edf7 100%);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
