@@ -67,7 +67,7 @@ export function createMockRoom(playerId: string, nickname: string) {
     code,
     hostPlayerId: playerId,
     players: [makePlayer(playerId, nickname, true)],
-    status: "lobby",
+    status: "LOBBY",
     createdAt: Date.now(),
   };
 

@@ -1,20 +1,26 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
 import { Panel } from "@/components/Panel";
-import { ensurePlayerInMockRoom, getMockRoom } from "@/lib/mockRooms";
-import { getLocalSession, saveLocalSession } from "@/lib/localSession";
+import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
+import { supabase } from "@/lib/supabaseClient";
+import {
+  dissolveSupabaseRoom,
+  getPlayersByRoomId,
+  getRoomByCode,
+  joinSupabaseRoom,
+  leaveSupabaseRoom,
+} from "@/lib/supabaseRooms";
 import type { Room } from "@/types/game";
 
 const statusText: Record<Room["status"], string> = {
-  lobby: "大厅等待中",
-  selecting_question_master: "选择出题人",
-  playing: "游戏进行中",
-  finished: "本轮已结束",
+  LOBBY: "大厅等待中",
+  SELECTING_PRESENTER: "选择出题人",
+  PLAYING: "游戏进行中",
+  FINISHED: "本轮已结束",
 };
 
 export default function RoomPage() {
@@ -25,49 +31,163 @@ export default function RoomPage() {
   const [playerId, setPlayerId] = useState("");
   const [nickname, setNickname] = useState("");
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isDissolving, setIsDissolving] = useState(false);
 
   useEffect(() => {
-    const session = getLocalSession();
-    setPlayerId(session.playerId);
-    setNickname(session.nickname);
+    let isMounted = true;
 
-    if (!session.nickname) {
-      setError("缺少昵称，请回到首页重新进入房间。");
-      return;
-    }
+    async function loadRoom() {
+      setIsLoading(true);
+      setError("");
 
-    const currentRoom = ensurePlayerInMockRoom(roomCode, session.playerId, session.nickname);
+      const session = getLocalSession();
+      setPlayerId(session.playerId);
+      setNickname(session.nickname);
 
-    if (!currentRoom) {
-      setError("没有找到房间。当前阶段房间只保存在本机浏览器中。");
-      return;
-    }
+      if (!session.nickname) {
+        setError("缺少昵称，请回到首页重新进入房间。");
+        setIsLoading(false);
+        return;
+      }
 
-    saveLocalSession({
-      playerId: session.playerId,
-      nickname: session.nickname,
-      roomCode,
-      isHost: currentRoom.hostPlayerId === session.playerId,
-    });
+      try {
+        const joined = await joinSupabaseRoom(roomCode, session.playerId, session.nickname);
 
-    setRoom(currentRoom);
+        if (joined.error || !joined.room) {
+          if (isMounted) {
+            setError(joined.error ?? "没有找到房间。");
+            setRoom(null);
+          }
+          return;
+        }
 
-    function refreshRoom() {
-      const latestRoom = getMockRoom(roomCode);
+        saveLocalSession({
+          playerId: session.playerId,
+          nickname: session.nickname,
+          roomCode,
+          isHost: joined.room.hostPlayerId === session.playerId,
+        });
 
-      if (latestRoom) {
-        setRoom(latestRoom);
+        if (isMounted) {
+          setRoom(joined.room);
+        }
+      } catch (caughtError) {
+        if (isMounted) {
+          setError(caughtError instanceof Error ? caughtError.message : "加载房间失败，请稍后重试。");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
 
-    window.addEventListener("storage", refreshRoom);
-    const timer = window.setInterval(refreshRoom, 800);
+    loadRoom();
 
     return () => {
-      window.removeEventListener("storage", refreshRoom);
-      window.clearInterval(timer);
+      isMounted = false;
     };
   }, [roomCode]);
+
+  useEffect(() => {
+    if (!room?.id || !playerId) {
+      return;
+    }
+
+    function markRoomDissolved() {
+      clearLocalRoomSession();
+      setRoom(null);
+      setError("房间已被房主解散。");
+    }
+
+    async function checkRoomStillExists() {
+      const latestRoom = await getRoomByCode(roomCode);
+
+      if (!latestRoom) {
+        markRoomDissolved();
+        return false;
+      }
+
+      return true;
+    }
+
+    async function refreshPlayers() {
+      if (!room?.id) {
+        return;
+      }
+
+      const players = await getPlayersByRoomId(room.id);
+
+      if (!players.some((player) => player.id === playerId)) {
+        const roomExists = await checkRoomStillExists();
+
+        if (!roomExists) {
+          return;
+        }
+      }
+
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, players } : currentRoom));
+    }
+
+    const channel = supabase
+      .channel(`room:${room.id}:players`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "players",
+          filter: `room_id=eq.${room.id}`,
+        },
+        async (payload) => {
+          if (payload.eventType === "DELETE" && payload.old.id === playerId) {
+            const roomExists = await checkRoomStillExists();
+
+            if (!roomExists) {
+              return;
+            }
+          }
+
+          refreshPlayers().catch((caughtError) => {
+            setError(caughtError instanceof Error ? caughtError.message : "刷新玩家列表失败。");
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [playerId, room?.id, roomCode]);
+
+  useEffect(() => {
+    if (!room?.id) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`room:${room.id}:meta`)
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "rooms",
+          filter: `id=eq.${room.id}`,
+        },
+        () => {
+          clearLocalRoomSession();
+          setRoom(null);
+          setError("房间已被房主解散。");
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [room?.id]);
 
   const currentPlayer = useMemo(
     () => room?.players.find((player) => player.id === playerId) ?? null,
@@ -76,22 +196,75 @@ export default function RoomPage() {
 
   const isHost = Boolean(currentPlayer?.isHost);
 
+  async function handleBackHome() {
+    try {
+      if (room?.id && playerId && !isHost) {
+        await leaveSupabaseRoom(room.id, playerId);
+      }
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试。");
+      return;
+    }
+
+    if (!isHost) {
+      clearLocalRoomSession();
+    }
+
+    router.push("/");
+  }
+
+  async function handleDissolveRoom() {
+    if (!room?.id || !playerId || !isHost) {
+      return;
+    }
+
+    const confirmed = window.confirm("确定要解散房间吗？房间内所有玩家都会被移出。");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDissolving(true);
+    setError("");
+
+    try {
+      await dissolveSupabaseRoom(room.id, playerId);
+      clearLocalRoomSession();
+      router.push("/");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试。");
+    } finally {
+      setIsDissolving(false);
+    }
+  }
+
   return (
     <AppShell>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <Link className="text-sm font-semibold text-[var(--primary)] hover:underline" href="/">
+          <button
+            className="text-sm font-semibold text-[var(--primary)] hover:underline"
+            type="button"
+            onClick={handleBackHome}
+          >
             返回首页
-          </Link>
+          </button>
           <h1 className="mt-3 text-4xl font-bold text-slate-950">房间 {roomCode}</h1>
           <p className="mt-2 text-[var(--muted)]">
             当前玩家：{nickname || "未设置昵称"}
             {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
           </p>
         </div>
-        <Button type="button" variant="secondary" onClick={() => router.refresh()}>
-          刷新视图
-        </Button>
+        <div className="flex gap-3">
+          {isHost ? (
+            <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+              {isDissolving ? "解散中..." : "解散房间"}
+            </Button>
+          ) : null}
+          <Button type="button" variant="secondary" onClick={() => router.refresh()}>
+            刷新视图
+          </Button>
+        </div>
       </div>
 
       {error ? (
@@ -100,6 +273,10 @@ export default function RoomPage() {
           <Button className="mt-4" type="button" onClick={() => router.push("/")}>
             回到首页
           </Button>
+        </Panel>
+      ) : isLoading ? (
+        <Panel title="加载房间">
+          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Supabase 读取房间和玩家列表...</p>
         </Panel>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
@@ -144,8 +321,7 @@ export default function RoomPage() {
             </div>
 
             <div className="mt-5 rounded-md border border-dashed border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
-              本阶段暂不接 Supabase，因此玩家列表来自当前浏览器的本地 mock 数据。下一阶段接入数据库和实时同步后，
-              这里会显示同一房间内所有设备的真实玩家列表。
+              本阶段已接入 Supabase。玩家列表来自数据库，并通过 Supabase Realtime 订阅 players 表变化。
             </div>
           </Panel>
         </div>

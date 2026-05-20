@@ -57,6 +57,13 @@ export function saveLocalSession(session: Partial<LocalSession>) {
   }
 }
 
+export function clearLocalRoomSession() {
+  sessionStorage.removeItem(SESSION_KEYS.roomCode);
+  sessionStorage.removeItem(SESSION_KEYS.isHost);
+  localStorage.removeItem(STORAGE_KEYS.roomCode);
+  localStorage.removeItem(STORAGE_KEYS.isHost);
+}
+
 export function createNewLocalPlayerSession(nickname: string) {
   const playerId = createPlayerId();
 

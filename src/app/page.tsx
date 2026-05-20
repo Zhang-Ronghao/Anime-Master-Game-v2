@@ -7,13 +7,14 @@ import { Button } from "@/components/Button";
 import { FormField } from "@/components/FormField";
 import { Panel } from "@/components/Panel";
 import { createNewLocalPlayerSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
-import { createMockRoom, getMockRoom, hasPlayerInMockRoom, joinMockRoom } from "@/lib/mockRooms";
+import { createSupabaseRoom, getRoomByCode, joinSupabaseRoom } from "@/lib/supabaseRooms";
 
 export default function HomePage() {
   const router = useRouter();
   const [nickname, setNickname] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const session = getLocalSession();
@@ -32,27 +33,36 @@ export default function HomePage() {
     return trimmedNickname;
   }
 
-  function handleCreateRoom() {
+  async function handleCreateRoom() {
     const trimmedNickname = validateNickname();
 
     if (!trimmedNickname) {
       return;
     }
 
-    const session = getLocalSession();
-    const room = createMockRoom(session.playerId, trimmedNickname);
+    setIsSubmitting(true);
+    setError("");
 
-    saveLocalSession({
-      playerId: session.playerId,
-      nickname: trimmedNickname,
-      roomCode: room.code,
-      isHost: true,
-    });
+    try {
+      const session = getLocalSession();
+      const room = await createSupabaseRoom(session.playerId, trimmedNickname);
 
-    router.push(`/room/${room.code}`);
+      saveLocalSession({
+        playerId: session.playerId,
+        nickname: trimmedNickname,
+        roomCode: room.code,
+        isHost: true,
+      });
+
+      router.push(`/room/${room.code}`);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "创建房间失败，请稍后重试。");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
-  function handleJoinRoom() {
+  async function handleJoinRoom() {
     const trimmedNickname = validateNickname();
     const trimmedRoomCode = roomCode.trim();
 
@@ -65,44 +75,46 @@ export default function HomePage() {
       return;
     }
 
-    const existingRoom = getMockRoom(trimmedRoomCode);
+    setIsSubmitting(true);
+    setError("");
 
-    if (!existingRoom) {
-      setError("房间不存在。请先由房主创建房间。");
-      return;
-    }
+    try {
+      const existingRoom = await getRoomByCode(trimmedRoomCode);
 
-    let session = getLocalSession();
-    const existingPlayer = existingRoom.players.find((player) => player.id === session.playerId);
+      if (!existingRoom) {
+        setError("房间不存在。请检查房间号是否正确。");
+        return;
+      }
 
-    if (existingPlayer && existingPlayer.nickname !== trimmedNickname) {
-      session = createNewLocalPlayerSession(trimmedNickname);
-    }
+      let session = getLocalSession();
+      const isSameStoredRoom = session.roomCode === trimmedRoomCode;
 
-    if (!hasPlayerInMockRoom(trimmedRoomCode, session.playerId)) {
+      if (!isSameStoredRoom && session.nickname && session.nickname !== trimmedNickname) {
+        session = createNewLocalPlayerSession(trimmedNickname);
+      }
+
+      const result = await joinSupabaseRoom(trimmedRoomCode, session.playerId, trimmedNickname);
+
+      if (result.error || !result.room) {
+        setError(result.error ?? "加入房间失败，请稍后重试。");
+        return;
+      }
+
+      const isHost = result.room.hostPlayerId === session.playerId;
+
       saveLocalSession({
         playerId: session.playerId,
         nickname: trimmedNickname,
+        roomCode: result.room.code,
+        isHost,
       });
+
+      router.push(`/room/${result.room.code}`);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "加入房间失败，请稍后重试。");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    const room = joinMockRoom(trimmedRoomCode, session.playerId, trimmedNickname);
-
-    if (!room) {
-      setError("房间不存在。请先由房主创建房间。");
-      return;
-    }
-
-    const isHost = room.hostPlayerId === session.playerId;
-
-    saveLocalSession({
-      playerId: session.playerId,
-      nickname: trimmedNickname,
-      roomCode: room.code,
-      isHost,
-    });
-
-    router.push(`/room/${room.code}`);
   }
 
   return (
@@ -147,8 +159,8 @@ export default function HomePage() {
               }}
             />
 
-            <Button className="w-full" type="button" onClick={handleCreateRoom}>
-              创建房间
+            <Button className="w-full" type="button" onClick={handleCreateRoom} disabled={isSubmitting}>
+              {isSubmitting ? "处理中..." : "创建房间"}
             </Button>
 
             <div className="border-t border-[var(--line)] pt-4">
@@ -163,8 +175,14 @@ export default function HomePage() {
                   setError("");
                 }}
               />
-              <Button className="mt-4 w-full" type="button" variant="secondary" onClick={handleJoinRoom}>
-                加入房间
+              <Button
+                className="mt-4 w-full"
+                type="button"
+                variant="secondary"
+                onClick={handleJoinRoom}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? "处理中..." : "加入房间"}
               </Button>
             </div>
 
