@@ -534,8 +534,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     return <p className="text-sm text-red-700">没有找到当前游戏题目。</p>;
   }
 
-  const playingGridClass =
-    "grid gap-4 lg:grid-cols-[280px_minmax(0,1280px)_280px] xl:grid-cols-[300px_minmax(0,1280px)_300px] lg:justify-center";
+  const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
+  const playingGridClass = "grid gap-4 lg:grid-cols-6";
 
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
@@ -718,26 +718,32 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     <div className="space-y-4">
       <div className={`${playingGridClass} text-sm`}>
         <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+          <p className="text-[var(--muted)]">房间 / 当前玩家</p>
+          <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
+          <p className="mt-1 truncate text-xs text-[var(--muted)]">
+            {currentPlayerName}
+            {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+          </p>
+        </div>
+        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
           <p className="text-[var(--muted)]">当前题号</p>
           <p className="mt-1 text-lg font-semibold text-slate-950">
             {gameSession.currentQuestionIndex + 1} / {questions.length}
           </p>
         </div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-            <p className="text-[var(--muted)]">当前轮次</p>
-            <p className="mt-1 text-lg font-semibold text-slate-950">
-              第 {currentRound} / {maxRevealRounds} 轮
-            </p>
-          </div>
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-            <p className="text-[var(--muted)]">本轮分数</p>
-            <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
-          </div>
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-            <p className="text-[var(--muted)]">倒计时</p>
-            <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
-          </div>
+        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+          <p className="text-[var(--muted)]">当前轮次</p>
+          <p className="mt-1 text-lg font-semibold text-slate-950">
+            第 {currentRound} / {maxRevealRounds} 轮
+          </p>
+        </div>
+        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+          <p className="text-[var(--muted)]">本轮分数</p>
+          <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
+        </div>
+        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+          <p className="text-[var(--muted)]">倒计时</p>
+          <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
         </div>
         <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
           <p className="text-[var(--muted)]">已答对</p>
@@ -749,7 +755,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
       <div className={playingGridClass}>
         {scorePanel}
-        <div className="min-w-0">{imagePanel}</div>
+        <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
 

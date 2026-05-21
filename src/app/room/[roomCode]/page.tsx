@@ -722,27 +722,29 @@ export default function RoomPage() {
 
   return (
     <AppShell>
-      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
-          <button
-            className="text-sm font-semibold text-[var(--primary)] hover:underline"
-            type="button"
-            onClick={handleBackHome}
-          >
-            返回首页
-          </button>
-          <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
-          <p className="text-sm text-[var(--muted)] sm:text-base">
-            当前玩家：{nickname || "未设置昵称"}
-            {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
-          </p>
+      {room?.status !== "PLAYING" ? (
+        <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              className="text-sm font-semibold text-[var(--primary)] hover:underline"
+              type="button"
+              onClick={handleBackHome}
+            >
+              返回首页
+            </button>
+            <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
+            <p className="text-sm text-[var(--muted)] sm:text-base">
+              当前玩家：{nickname || "未设置昵称"}
+              {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
+            </p>
+          </div>
+          {isHost ? (
+            <Button className="shrink-0" type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+              {isDissolving ? "解散中..." : "解散房间"}
+            </Button>
+          ) : null}
         </div>
-        {isHost ? (
-          <Button className="shrink-0" type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-            {isDissolving ? "解散中..." : "解散房间"}
-          </Button>
-        ) : null}
-      </div>
+      ) : null}
 
       {error ? (
         <>
@@ -775,11 +777,21 @@ export default function RoomPage() {
               setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : nextRoom))
             }
           />
-          {isHost ? (
-            <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
-              {isCancelingRound ? "取消中..." : "取消本轮"}
+          <div className="flex flex-wrap justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={handleBackHome}>
+              返回首页
             </Button>
-          ) : null}
+            {isHost ? (
+              <>
+                <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
+                  {isCancelingRound ? "取消中..." : "取消本轮"}
+                </Button>
+                <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+                  {isDissolving ? "解散中..." : "解散房间"}
+                </Button>
+              </>
+            ) : null}
+          </div>
         </main>
       ) : (
         <div className={room.status === "QUESTION_SETUP" ? "grid gap-5" : "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]"}>
