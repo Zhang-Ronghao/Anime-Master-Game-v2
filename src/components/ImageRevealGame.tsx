@@ -94,6 +94,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -294,6 +295,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
+  const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
+  const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
+  const allActiveGuessersSubmitted =
+    activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
   const scoreRows = room.players
     .filter((player) => player.id !== room.currentPresenterPlayerId)
     .map((player) => ({
@@ -313,6 +318,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canSubmitAnswer =
     !isPresenter && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
   const canGrade = isPresenter && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
+
+  useEffect(() => {
+    if (!gameSession || !canGrade || isJudgeModalOpen || isGrading) {
+      return;
+    }
+
+    const shouldAutoOpenJudge = isRoundEnded || allActiveGuessersSubmitted;
+    const autoJudgeKey = `${gameSession.id}:${gameSession.currentQuestionIndex}:${gameSession.currentRevealRound}`;
+
+    if (shouldAutoOpenJudge && lastAutoJudgeKey !== autoJudgeKey) {
+      setIsJudgeModalOpen(true);
+      setLastAutoJudgeKey(autoJudgeKey);
+    }
+  }, [allActiveGuessersSubmitted, canGrade, gameSession, isGrading, isJudgeModalOpen, isRoundEnded, lastAutoJudgeKey]);
 
   function toggleBlock(blockIndex: number) {
     if (
@@ -515,6 +534,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     return <p className="text-sm text-red-700">没有找到当前游戏题目。</p>;
   }
 
+  const playingGridClass =
+    "grid gap-4 lg:grid-cols-[280px_minmax(0,1280px)_280px] xl:grid-cols-[300px_minmax(0,1280px)_300px] lg:justify-center";
+
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
@@ -694,26 +716,28 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 text-sm sm:grid-cols-5">
+      <div className={`${playingGridClass} text-sm`}>
         <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
           <p className="text-[var(--muted)]">当前题号</p>
           <p className="mt-1 text-lg font-semibold text-slate-950">
             {gameSession.currentQuestionIndex + 1} / {questions.length}
           </p>
         </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">当前轮次</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            第 {currentRound} / {maxRevealRounds} 轮
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">本轮分数</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">倒计时</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+            <p className="text-[var(--muted)]">当前轮次</p>
+            <p className="mt-1 text-lg font-semibold text-slate-950">
+              第 {currentRound} / {maxRevealRounds} 轮
+            </p>
+          </div>
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+            <p className="text-[var(--muted)]">本轮分数</p>
+            <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
+          </div>
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+            <p className="text-[var(--muted)]">倒计时</p>
+            <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
+          </div>
         </div>
         <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
           <p className="text-[var(--muted)]">已答对</p>
@@ -723,7 +747,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1280px)_320px] xl:grid-cols-[300px_minmax(0,1280px)_340px] lg:justify-center">
+      <div className={playingGridClass}>
         {scorePanel}
         <div className="min-w-0">{imagePanel}</div>
         {actionPanel}

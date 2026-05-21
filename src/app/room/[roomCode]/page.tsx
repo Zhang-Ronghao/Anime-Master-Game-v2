@@ -722,8 +722,8 @@ export default function RoomPage() {
 
   return (
     <AppShell>
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
+      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
           <button
             className="text-sm font-semibold text-[var(--primary)] hover:underline"
             type="button"
@@ -731,22 +731,17 @@ export default function RoomPage() {
           >
             返回首页
           </button>
-          <h1 className="mt-3 text-4xl font-bold text-slate-950">房间 {roomCode}</h1>
-          <p className="mt-2 text-[var(--muted)]">
+          <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">房间 {roomCode}</h1>
+          <p className="text-sm text-[var(--muted)] sm:text-base">
             当前玩家：{nickname || "未设置昵称"}
             {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
           </p>
         </div>
-        <div className="flex gap-3">
-          {isHost ? (
-            <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-              {isDissolving ? "解散中..." : "解散房间"}
-            </Button>
-          ) : null}
-          <Button type="button" variant="secondary" onClick={() => router.refresh()}>
-            刷新视图
+        {isHost ? (
+          <Button className="shrink-0" type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+            {isDissolving ? "解散中..." : "解散房间"}
           </Button>
-        </div>
+        ) : null}
       </div>
 
       {error ? (
