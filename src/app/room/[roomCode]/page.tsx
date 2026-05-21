@@ -170,7 +170,7 @@ function GameSettingsPanel({
             type="number"
             value={settings.roundSeconds}
             onChange={(event) =>
-              onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 30)) })
+              onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 60)) })
             }
           />
         </label>
@@ -473,7 +473,7 @@ export default function RoomPage() {
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     maxRevealRounds: 3,
-    roundSeconds: 30,
+    roundSeconds: 60,
     roundScores: [3, 2, 1],
   });
 
@@ -818,7 +818,7 @@ export default function RoomPage() {
             {isHost ? (
               <>
                 <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
-                  {isCancelingRound ? "取消中..." : "取消本轮"}
+                  {isCancelingRound ? "取消中..." : "取消本局"}
                 </Button>
                 <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
                   {isDissolving ? "解散中..." : "解散房间"}

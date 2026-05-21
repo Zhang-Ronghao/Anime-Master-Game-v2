@@ -97,6 +97,7 @@ export function QuestionSetUploader({
 }: QuestionSetUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<SetupMode>("upload");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -139,6 +140,12 @@ export function QuestionSetUploader({
 
   function clearError() {
     onClearError?.();
+  }
+
+  function scrollToPreview() {
+    window.setTimeout(() => {
+      previewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
   }
 
   function resetCreatedSet() {
@@ -220,6 +227,7 @@ export function QuestionSetUploader({
 
     setQuestionSet(createdQuestionSet);
     clearError();
+    scrollToPreview();
     return createdQuestionSet;
   }
 
@@ -271,6 +279,7 @@ export function QuestionSetUploader({
       });
       setQuestionSet(createdQuestionSet);
       clearError();
+      scrollToPreview();
     } catch (error) {
       onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败。");
     } finally {
@@ -297,6 +306,7 @@ export function QuestionSetUploader({
     setTitle(selectedQuestionSet.title);
     setDescription(selectedQuestionSet.description ?? "");
     clearError();
+    scrollToPreview();
   }
 
   async function handleCopyUrlsText() {
@@ -338,7 +348,7 @@ export function QuestionSetUploader({
       <div>
         <p className="font-semibold text-slate-900">你是本轮出题人，请准备题库。</p>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          选择一种题库来源，创建或选中题库后检查预览，再点击“开始游戏”。游戏轮数和倒计时在上方“本轮游戏设置”里调整。
+          选择一种题库来源，创建或选中题库后检查预览，再点击“开始游戏”。
         </p>
       </div>
 
@@ -594,7 +604,7 @@ export function QuestionSetUploader({
       ) : null}
 
       {questionSet ? (
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+        <div ref={previewRef} className="rounded-md border border-[var(--line)] bg-slate-50 p-4 scroll-mt-4">
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
             <div>
               <p className="font-semibold text-slate-950">{questionSet.title}</p>

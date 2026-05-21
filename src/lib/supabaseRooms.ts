@@ -110,7 +110,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks,
     maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
-    roundSeconds: gameSession.round_seconds ?? 30,
+    roundSeconds: gameSession.round_seconds ?? 60,
     roundScores,
     roundStartedAt: gameSession.round_started_at,
     createdAt: gameSession.created_at,
@@ -656,7 +656,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
-  const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 30)));
+  const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 60)));
   const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
     const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
     return Math.max(0, Math.floor(score));
@@ -786,7 +786,7 @@ export async function confirmRevealBlocks(params: {
 
   const roundStartedAt = currentGameSession.round_started_at;
   const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
-  const roundDurationMs = Math.max(1, currentGameSession.round_seconds ?? 30) * 1000;
+  const roundDurationMs = Math.max(1, currentGameSession.round_seconds ?? 60) * 1000;
   const roundEnded = !roundStartedAt || Date.now() - new Date(roundStartedAt).getTime() >= roundDurationMs;
   const nextRevealRound =
     roundStartedAt && roundEnded

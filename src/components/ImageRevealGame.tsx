@@ -32,7 +32,7 @@ type ImageRevealGameProps = {
 const LANDSCAPE_GRID_COLUMNS = 9;
 const PORTRAIT_GRID_COLUMNS = 5;
 const TOTAL_BLOCKS = 45;
-const DEFAULT_ROUND_SECONDS = 30;
+const DEFAULT_ROUND_SECONDS = 60;
 
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
@@ -961,7 +961,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
             <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
               <Button type="button" variant="secondary" onClick={handleDisableLabelPromptForGame}>
-                本轮不再补充标签
+                本局游戏不再弹出该窗口
               </Button>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Button type="button" variant="secondary" onClick={() => setIsLabelModalOpen(false)}>
