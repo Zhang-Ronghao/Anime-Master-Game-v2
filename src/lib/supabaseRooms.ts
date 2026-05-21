@@ -83,7 +83,13 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
 
 function toGameSession(gameSession: DbGameSession): GameSession {
   const revealedBlocks = Array.isArray(gameSession.revealed_blocks)
-    ? gameSession.revealed_blocks.filter((block): block is number => Number.isInteger(block))
+    ? Array.from(
+        new Set(
+          gameSession.revealed_blocks.filter(
+            (block): block is number => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT,
+          ),
+        ),
+      ).sort((a, b) => a - b)
     : [];
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
@@ -148,6 +154,7 @@ function isUniqueViolation(error: { code?: string } | null) {
 
 const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
+const MAX_PLAYERS_PER_ROOM = 15;
 
 export function parseImageUrlsText(imageUrlsText: string) {
   return Array.from(
@@ -295,6 +302,15 @@ export async function joinSupabaseRoom(roomCode: string, playerId: string, nickn
     return {
       room: null,
       error: "该昵称已在房间中使用，请换一个昵称。",
+    };
+  }
+
+  const isExistingPlayer = players.some((player) => player.id === playerId);
+
+  if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
+    return {
+      room: null,
+      error: `房间人数已满，最多 ${MAX_PLAYERS_PER_ROOM} 人。`,
     };
   }
 
@@ -676,6 +692,13 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!updatedRoom) {
+    await supabase
+      .from("game_sessions")
+      .update({
+        status: "GAME_RESULT",
+        ended_at: new Date().toISOString(),
+      })
+      .eq("id", gameSession.id);
     throw new Error("开始游戏失败，房间状态已变化。");
   }
 

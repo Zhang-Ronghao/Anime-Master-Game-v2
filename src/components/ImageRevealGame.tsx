@@ -46,7 +46,13 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     currentQuestionIndex: gameSession.current_question_index,
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks: Array.isArray(gameSession.revealed_blocks)
-      ? gameSession.revealed_blocks.filter((block): block is number => Number.isInteger(block))
+      ? Array.from(
+          new Set(
+            gameSession.revealed_blocks.filter(
+              (block): block is number => Number.isInteger(block) && block >= 0 && block < TOTAL_BLOCKS,
+            ),
+          ),
+        ).sort((a, b) => a - b)
       : [],
     maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
     roundSeconds: gameSession.round_seconds ?? DEFAULT_ROUND_SECONDS,
@@ -87,6 +93,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -149,6 +156,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         if (isMounted) {
           setGameSession(loadedGameSession);
           setQuestions(loadedQuestions);
+          setImageLoadFailed(false);
           setRemainingSeconds(getRemainingSeconds(loadedGameSession.roundStartedAt, loadedGameSession.roundSeconds));
           await refreshRoundData(loadedGameSession);
         }
@@ -188,6 +196,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         (payload) => {
           const nextGameSession = toGameSession(payload.new as DbGameSession);
           setGameSession(nextGameSession);
+          setImageLoadFailed(false);
           setSelectedBlocks([]);
           setSelectedCorrectPlayerIds([]);
           setRemainingSeconds(getRemainingSeconds(nextGameSession.roundStartedAt, nextGameSession.roundSeconds));
@@ -390,6 +399,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         correctPlayerIds: selectedCorrectPlayerIds,
       });
       setGameSession(graded.gameSession);
+      setImageLoadFailed(false);
       setSelectedCorrectPlayerIds([]);
       setSelectedBlocks([]);
       setRemainingSeconds(getRemainingSeconds(graded.gameSession.roundStartedAt, graded.gameSession.roundSeconds));
@@ -425,6 +435,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
       });
       setGameSession(skipped.gameSession);
+      setImageLoadFailed(false);
       setSelectedBlocks([]);
       setSelectedCorrectPlayerIds([]);
       setRemainingSeconds(getRemainingSeconds(skipped.gameSession.roundStartedAt, skipped.gameSession.roundSeconds));
@@ -453,6 +464,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
       });
       setGameSession(advanced.gameSession);
+      setImageLoadFailed(false);
       setSelectedBlocks([]);
       setSelectedCorrectPlayerIds([]);
       setRemainingSeconds(getRemainingSeconds(advanced.gameSession.roundStartedAt, advanced.gameSession.roundSeconds));
@@ -568,9 +580,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 setIsPortraitImage(image.naturalHeight > image.naturalWidth);
               }
             }}
+            onError={() => setImageLoadFailed(true)}
           />
 
-          {!isPresenter ? (
+          {imageLoadFailed ? (
+            <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
+              <div>
+                <p className="text-lg font-semibold">图片加载失败</p>
+                <p className="mt-2 text-sm text-slate-300">可能是图片 URL 失效、跨域限制或网络异常。</p>
+                {isPresenter ? (
+                  <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+                    {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {!isPresenter && !imageLoadFailed ? (
             <div
               className="absolute inset-0 grid"
               style={{
@@ -584,7 +611,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             </div>
           ) : null}
 
-          {isPresenter ? (
+          {isPresenter && !imageLoadFailed ? (
             <div
               className="absolute inset-0 grid"
               style={{

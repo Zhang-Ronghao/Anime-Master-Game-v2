@@ -125,10 +125,10 @@ export default function HomePage() {
             Anime Master Game
           </div>
           <h1 className="max-w-2xl text-4xl font-bold leading-tight text-slate-950 sm:text-5xl">
-            根据动画截图猜动画的多人实时小游戏
+            动漫高手
           </h1>
           <p className="mt-5 max-w-xl text-base leading-7 text-[var(--muted)]">
-            当前阶段使用本地 mock 数据搭建创建房间、加入房间和房间页面骨架，后续会替换为 Supabase 实时同步。
+            根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称。
           </p>
           <div className="mt-8 grid max-w-xl gap-3 sm:grid-cols-3">
             <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
@@ -140,8 +140,8 @@ export default function HomePage() {
               <p className="mt-1 text-sm text-[var(--muted)]">临时身份</p>
             </div>
             <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
-              <p className="text-2xl font-bold text-slate-950">MVP</p>
-              <p className="mt-1 text-sm text-[var(--muted)]">阶段 1</p>
+              <p className="text-2xl font-bold text-slate-950">15 人</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">房间上限</p>
             </div>
           </div>
         </section>

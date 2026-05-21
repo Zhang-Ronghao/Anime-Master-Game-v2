@@ -457,6 +457,11 @@ export function QuestionSetUploader({
             <div className="rounded-md bg-slate-50 p-3">成功：{progress.success}</div>
             <div className="rounded-md bg-slate-50 p-3">失败：{progress.fail}</div>
           </div>
+          {progress.fail > 0 ? (
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              有图片上传失败。保留当前选择后可以再次点击“上传并创建题库”重试。
+            </p>
+          ) : null}
           <div>
             <div className="h-3 overflow-hidden rounded-full bg-slate-100">
               <div className="h-full bg-[var(--primary)] transition-all" style={{ width: `${progressPercent}%` }} />
