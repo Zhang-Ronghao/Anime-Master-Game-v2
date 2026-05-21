@@ -111,10 +111,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
+  const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
+  const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -345,6 +348,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
   const isQuestionReviewing = !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
+  const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
@@ -375,7 +379,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   useEffect(() => {
     setLabelInput("");
+    setIsLabelModalOpen(false);
   }, [currentQuestion?.id, currentQuestionLabel]);
+
+  useEffect(() => {
+    setIsLabelPromptDisabledForGame(false);
+    setLastAutoLabelKey("");
+  }, [gameSession?.id]);
 
   useEffect(() => {
     if (!gameSession || !canGrade || isJudgeModalOpen || isGrading) {
@@ -390,6 +400,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLastAutoJudgeKey(autoJudgeKey);
     }
   }, [allActiveGuessersSubmitted, canGrade, gameSession, isGrading, isJudgeModalOpen, isRoundEnded, lastAutoJudgeKey]);
+
+  useEffect(() => {
+    if (!gameSession || !canAddQuestionLabel || isJudgeModalOpen || isLabelModalOpen || isLabelPromptDisabledForGame) {
+      return;
+    }
+
+    const autoLabelKey = `${gameSession.id}:${gameSession.currentQuestionIndex}`;
+
+    if (lastAutoLabelKey !== autoLabelKey) {
+      setIsLabelModalOpen(true);
+      setLastAutoLabelKey(autoLabelKey);
+    }
+  }, [canAddQuestionLabel, gameSession, isJudgeModalOpen, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
 
   async function saveQuestionLabel(params: { labelText: string; source: "manual" | "answer"; answerId?: string | null }) {
     if (!gameSession || !currentQuestion || !canAddQuestionLabel) {
@@ -411,6 +434,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         currentQuestions.map((question) => (question.id === updatedQuestion.id ? updatedQuestion : question)),
       );
       setLabelInput("");
+      setIsLabelModalOpen(false);
     } catch (error) {
       onError(error instanceof Error ? error.message : "保存图片标签失败。");
     } finally {
@@ -431,6 +455,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   function handleUseAnswerAsLabel(answer: Answer) {
     void saveQuestionLabel({ labelText: answer.answerText, source: "answer", answerId: answer.id });
+  }
+
+  function handleDisableLabelPromptForGame() {
+    setIsLabelPromptDisabledForGame(true);
+    setIsLabelModalOpen(false);
   }
 
   function toggleBlock(blockIndex: number) {
@@ -739,7 +768,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           </div>
         ) : null}
       </div>
-      {isQuestionReviewing ? (
+      {shouldShowQuestionLabel ? (
         <div className="mx-auto mt-3 max-w-[1280px] rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm">
           <span className="font-semibold text-slate-950">图片标签：</span>
           <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
@@ -763,41 +792,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "暂无标签"}</p>
           </div>
           {canAddQuestionLabel ? (
-            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3">
-              <p className="text-sm font-semibold text-slate-950">补充标签</p>
-              <p className="mt-1 text-xs text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖。</p>
-              <div className="mt-3 space-y-2">
-                {labelAnswers.length > 0 ? (
-                  labelAnswers.map((answer) => (
-                    <button
-                      className="w-full rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={isSavingLabel}
-                      key={answer.id}
-                      type="button"
-                      onClick={() => handleUseAnswerAsLabel(answer)}
-                    >
-                      <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
-                      <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
-                    </button>
-                  ))
-                ) : (
-                  <p className="text-xs text-[var(--muted)]">本题还没有可选择的玩家回答。</p>
-                )}
-              </div>
-              <label className="mt-3 block">
-                <span className="mb-2 block text-xs font-medium text-slate-900">手动输入标签</span>
-                <input
-                  className="h-10 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  maxLength={80}
-                  placeholder="例如：动画名称"
-                  value={labelInput}
-                  onChange={(event) => setLabelInput(event.target.value)}
-                />
-              </label>
-              <Button className="mt-2 w-full" type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
-                {isSavingLabel ? "保存中..." : "保存标签"}
-              </Button>
-            </div>
+            <Button className="mt-3 w-full" type="button" variant="secondary" onClick={() => setIsLabelModalOpen(true)}>
+              补充图片标签
+            </Button>
           ) : null}
           {isPresenter ? (
             <Button className="mt-3 w-full" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
@@ -907,6 +904,77 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
+
+      {isLabelModalOpen && canAddQuestionLabel ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
+          <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
+            <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-start">
+              <div>
+                <p className="text-lg font-semibold text-slate-950">补充图片标签</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖。</p>
+              </div>
+              <button
+                className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsLabelModalOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">选择玩家回答</p>
+                <div className="mt-2 space-y-2">
+                  {labelAnswers.length > 0 ? (
+                    labelAnswers.map((answer) => (
+                      <button
+                        className="w-full rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isSavingLabel}
+                        key={answer.id}
+                        type="button"
+                        onClick={() => handleUseAnswerAsLabel(answer)}
+                      >
+                        <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
+                        <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">
+                      本题还没有可选择的玩家回答。
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-slate-950">手动输入标签</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={80}
+                  placeholder="例如：动画名称"
+                  value={labelInput}
+                  onChange={(event) => setLabelInput(event.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
+              <Button type="button" variant="secondary" onClick={handleDisableLabelPromptForGame}>
+                本轮不再补充标签
+              </Button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button type="button" variant="secondary" onClick={() => setIsLabelModalOpen(false)}>
+                  稍后再说
+                </Button>
+                <Button type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
+                  {isSavingLabel ? "保存中..." : "保存标签"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isJudgeModalOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
