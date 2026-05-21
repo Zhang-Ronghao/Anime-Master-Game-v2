@@ -64,6 +64,11 @@ export type Question = {
   questionSetId: string;
   imageUrl: string;
   orderIndex: number;
+  labelText?: string | null;
+  labelSource?: "manual" | "answer" | null;
+  labelSourceAnswerId?: string | null;
+  labelUpdatedByPlayerId?: string | null;
+  labelUpdatedAt?: string | null;
   createdAt: string;
 };
 
@@ -141,6 +146,11 @@ export type DbQuestion = {
   question_set_id: string;
   image_url: string;
   order_index: number;
+  label_text?: string | null;
+  label_source?: "manual" | "answer" | null;
+  label_source_answer_id?: string | null;
+  label_updated_by_player_id?: string | null;
+  label_updated_at?: string | null;
   created_at: string;
 };
 

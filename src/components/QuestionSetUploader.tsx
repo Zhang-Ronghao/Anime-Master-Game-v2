@@ -63,6 +63,30 @@ function getQuestionSetUrls(questionSet: QuestionSet | null) {
     .map((question) => question.imageUrl);
 }
 
+function getQuestionSetPreviewItems(questionSet: QuestionSet | null) {
+  if (!questionSet) {
+    return [];
+  }
+
+  const questions = (questionSet.questions ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex);
+
+  if (questions.length > 0) {
+    return questions.map((question, index) => ({
+      key: question.id,
+      url: question.imageUrl,
+      labelText: question.labelText ?? null,
+      index,
+    }));
+  }
+
+  return getQuestionSetUrls(questionSet).map((url, index) => ({
+    key: `${url}-${index}`,
+    url,
+    labelText: null,
+    index,
+  }));
+}
+
 export function QuestionSetUploader({
   room,
   presenterPlayerId,
@@ -93,6 +117,7 @@ export function QuestionSetUploader({
   const configStatus = getCloudinaryUploadConfigStatus();
 
   const previewUrls = useMemo(() => getQuestionSetUrls(questionSet), [questionSet]);
+  const previewItems = useMemo(() => getQuestionSetPreviewItems(questionSet), [questionSet]);
   const urlsTextForPreview = previewUrls.join("\n");
   const progressPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   const filteredCommunitySets = useMemo(() => {
@@ -552,11 +577,14 @@ export function QuestionSetUploader({
             </div>
             <div className="overflow-y-auto p-5">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                {getQuestionSetUrls(previewingCommunitySet).map((url, index) => (
-                  <figure className="rounded-md border border-[var(--line)] bg-slate-50 p-2" key={`${url}-${index}`}>
+                {getQuestionSetPreviewItems(previewingCommunitySet).map((item) => (
+                  <figure className="rounded-md border border-[var(--line)] bg-slate-50 p-2" key={item.key}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={url} />
-                    <figcaption className="mt-2 text-xs text-[var(--muted)]">第 {index + 1} 张</figcaption>
+                    <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
+                    <figcaption className="mt-2 text-xs text-[var(--muted)]">
+                      第 {item.index + 1} 张
+                      <span className="mt-1 block font-medium text-slate-800">{item.labelText?.trim() || "未填写标签"}</span>
+                    </figcaption>
                   </figure>
                 ))}
               </div>
@@ -578,16 +606,24 @@ export function QuestionSetUploader({
               {isStartingGame ? "启动中..." : "开始游戏"}
             </Button>
           </div>
-          <div className="mt-4 grid grid-cols-4 gap-2 sm:grid-cols-6">
-            {previewUrls.slice(0, 12).map((url) => (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img alt="" className="aspect-square rounded-md border border-[var(--line)] object-cover" key={url} src={url} />
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+            {previewItems.slice(0, 12).map((item) => (
+              <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
+                <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写标签"}>
+                  {item.labelText?.trim() || "未填写标签"}
+                </figcaption>
+              </figure>
             ))}
             {previewUrls.length === 0
               ? results.slice(0, 12).map((result) =>
                   result.ok ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img alt="" className="aspect-square rounded-md border border-[var(--line)] object-cover" key={result.url} src={result.url} />
+                    <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
+                      <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写标签</figcaption>
+                    </figure>
                   ) : null,
                 )
               : null}

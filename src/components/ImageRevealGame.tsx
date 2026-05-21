@@ -7,6 +7,7 @@ import {
   advanceReviewedQuestion,
   confirmRevealBlocks,
   endCurrentGameEarly,
+  getAnswersForQuestion,
   getAnswerForPlayerRound,
   getAnswersForQuestionRound,
   getGameSessionById,
@@ -16,8 +17,9 @@ import {
   gradeAnswersAndAdvance,
   skipCurrentQuestion,
   submitAnswer,
+  updateQuestionLabel,
 } from "@/lib/supabaseRooms";
-import type { Answer, DbGameSession, GameSession, PlayerScore, Question, QuestionResult, Room } from "@/types/game";
+import type { Answer, DbGameSession, DbQuestion, GameSession, PlayerScore, Question, QuestionResult, Room } from "@/types/game";
 
 type ImageRevealGameProps = {
   room: Room;
@@ -72,13 +74,30 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
   return Math.max(0, roundSeconds - elapsedSeconds);
 }
 
+function toQuestion(question: DbQuestion): Question {
+  return {
+    id: question.id,
+    questionSetId: question.question_set_id,
+    imageUrl: question.image_url,
+    orderIndex: question.order_index,
+    labelText: question.label_text ?? null,
+    labelSource: question.label_source ?? null,
+    labelSourceAnswerId: question.label_source_answer_id ?? null,
+    labelUpdatedByPlayerId: question.label_updated_by_player_id ?? null,
+    labelUpdatedAt: question.label_updated_at ?? null,
+    createdAt: question.created_at,
+  };
+}
+
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
+  const [labelAnswers, setLabelAnswers] = useState<Answer[]>([]);
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null);
   const [answerText, setAnswerText] = useState("");
+  const [labelInput, setLabelInput] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [selectedCorrectPlayerIds, setSelectedCorrectPlayerIds] = useState<string[]>([]);
@@ -90,6 +109,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
+  const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
@@ -115,13 +135,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setQuestionResults(nextResults);
 
       if (isPresenter) {
-        const nextAnswers = await getAnswersForQuestionRound({
-          gameSessionId: targetGameSession.id,
-          questionIndex: targetGameSession.currentQuestionIndex,
-          revealRound: targetGameSession.currentRevealRound,
-        });
+        const [nextAnswers, nextLabelAnswers] = await Promise.all([
+          getAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+          getAnswersForQuestion({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+          }),
+        ]);
         setAnswers(nextAnswers);
+        setLabelAnswers(nextLabelAnswers);
       } else {
+        setLabelAnswers([]);
         const nextMyAnswer = await getAnswerForPlayerRound({
           gameSessionId: targetGameSession.id,
           questionIndex: targetGameSession.currentQuestionIndex,
@@ -237,6 +265,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             onError(error instanceof Error ? error.message : "刷新判分结果失败。");
           });
         },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "questions",
+        },
+        (payload) => {
+          const nextQuestion = toQuestion(payload.new as DbQuestion);
+
+          setQuestions((currentQuestions) =>
+            currentQuestions.map((question) => (question.id === nextQuestion.id ? nextQuestion : question)),
+          );
+        },
       );
 
     if (isPresenter) {
@@ -253,12 +296,21 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             return;
           }
 
-          getAnswersForQuestionRound({
-            gameSessionId: gameSession.id,
-            questionIndex: gameSession.currentQuestionIndex,
-            revealRound: gameSession.currentRevealRound,
-          })
-            .then(setAnswers)
+          Promise.all([
+            getAnswersForQuestionRound({
+              gameSessionId: gameSession.id,
+              questionIndex: gameSession.currentQuestionIndex,
+              revealRound: gameSession.currentRevealRound,
+            }),
+            getAnswersForQuestion({
+              gameSessionId: gameSession.id,
+              questionIndex: gameSession.currentQuestionIndex,
+            }),
+          ])
+            .then(([nextAnswers, nextLabelAnswers]) => {
+              setAnswers(nextAnswers);
+              setLabelAnswers(nextLabelAnswers);
+            })
             .catch((error) => onError(error instanceof Error ? error.message : "刷新答案失败。"));
         },
       );
@@ -280,6 +332,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
+  const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
   const gridColumns = isPortraitImage ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
   const gridRows = TOTAL_BLOCKS / gridColumns;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
@@ -318,6 +371,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canSubmitAnswer =
     !isPresenter && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
   const canGrade = isPresenter && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
+  const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
+
+  useEffect(() => {
+    setLabelInput("");
+  }, [currentQuestion?.id, currentQuestionLabel]);
 
   useEffect(() => {
     if (!gameSession || !canGrade || isJudgeModalOpen || isGrading) {
@@ -332,6 +390,48 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLastAutoJudgeKey(autoJudgeKey);
     }
   }, [allActiveGuessersSubmitted, canGrade, gameSession, isGrading, isJudgeModalOpen, isRoundEnded, lastAutoJudgeKey]);
+
+  async function saveQuestionLabel(params: { labelText: string; source: "manual" | "answer"; answerId?: string | null }) {
+    if (!gameSession || !currentQuestion || !canAddQuestionLabel) {
+      return;
+    }
+
+    setIsSavingLabel(true);
+    try {
+      const updatedQuestion = await updateQuestionLabel({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        questionId: currentQuestion.id,
+        labelText: params.labelText,
+        source: params.source,
+        answerId: params.answerId,
+      });
+
+      setQuestions((currentQuestions) =>
+        currentQuestions.map((question) => (question.id === updatedQuestion.id ? updatedQuestion : question)),
+      );
+      setLabelInput("");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "保存图片标签失败。");
+    } finally {
+      setIsSavingLabel(false);
+    }
+  }
+
+  function handleSaveManualLabel() {
+    const nextLabel = labelInput.trim();
+
+    if (!nextLabel) {
+      onError("请先输入标签。");
+      return;
+    }
+
+    void saveQuestionLabel({ labelText: nextLabel, source: "manual" });
+  }
+
+  function handleUseAnswerAsLabel(answer: Answer) {
+    void saveQuestionLabel({ labelText: answer.answerText, source: "answer", answerId: answer.id });
+  }
 
   function toggleBlock(blockIndex: number) {
     if (
@@ -639,6 +739,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           </div>
         ) : null}
       </div>
+      {isQuestionReviewing ? (
+        <div className="mx-auto mt-3 max-w-[1280px] rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm">
+          <span className="font-semibold text-slate-950">图片标签：</span>
+          <span className={currentQuestionLabel ? "text-slate-900" : "text-[var(--muted)]"}>
+            {currentQuestionLabel || "暂无标签"}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 
@@ -650,6 +758,47 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <p className="mt-1 text-sm text-[var(--muted)]">
             {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
           </p>
+          <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+            <p className="font-semibold text-slate-950">图片标签</p>
+            <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "暂无标签"}</p>
+          </div>
+          {canAddQuestionLabel ? (
+            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3">
+              <p className="text-sm font-semibold text-slate-950">补充标签</p>
+              <p className="mt-1 text-xs text-[var(--muted)]">可以选择一个玩家回答作为标签，或手动输入。保存后不能覆盖。</p>
+              <div className="mt-3 space-y-2">
+                {labelAnswers.length > 0 ? (
+                  labelAnswers.map((answer) => (
+                    <button
+                      className="w-full rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isSavingLabel}
+                      key={answer.id}
+                      type="button"
+                      onClick={() => handleUseAnswerAsLabel(answer)}
+                    >
+                      <span className="block font-semibold text-slate-950">{getPlayerName(answer.playerId)}</span>
+                      <span className="mt-1 block text-[var(--muted)]">{answer.answerText}</span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="text-xs text-[var(--muted)]">本题还没有可选择的玩家回答。</p>
+                )}
+              </div>
+              <label className="mt-3 block">
+                <span className="mb-2 block text-xs font-medium text-slate-900">手动输入标签</span>
+                <input
+                  className="h-10 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={80}
+                  placeholder="例如：动画名称"
+                  value={labelInput}
+                  onChange={(event) => setLabelInput(event.target.value)}
+                />
+              </label>
+              <Button className="mt-2 w-full" type="button" onClick={handleSaveManualLabel} disabled={isSavingLabel || !labelInput.trim()}>
+                {isSavingLabel ? "保存中..." : "保存标签"}
+              </Button>
+            </div>
+          ) : null}
           {isPresenter ? (
             <Button className="mt-3 w-full" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
               {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}

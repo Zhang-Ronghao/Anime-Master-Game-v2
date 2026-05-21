@@ -53,6 +53,11 @@ function toQuestion(question: DbQuestion): Question {
     questionSetId: question.question_set_id,
     imageUrl: question.image_url,
     orderIndex: question.order_index,
+    labelText: question.label_text ?? null,
+    labelSource: question.label_source ?? null,
+    labelSourceAnswerId: question.label_source_answer_id ?? null,
+    labelUpdatedByPlayerId: question.label_updated_by_player_id ?? null,
+    labelUpdatedAt: question.label_updated_at ?? null,
     createdAt: question.created_at,
   };
 }
@@ -843,6 +848,27 @@ export async function getAnswersForQuestionRound(params: {
   return (data ?? []).map(toAnswer);
 }
 
+export async function getAnswersForQuestion(params: {
+  gameSessionId: string;
+  questionIndex: number;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .order("submitted_at", { ascending: true })
+    .returns<DbAnswer[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toAnswer);
+}
+
 export async function getAnswerForPlayerRound(params: {
   gameSessionId: string;
   questionIndex: number;
@@ -1391,6 +1417,133 @@ export async function advanceReviewedQuestion(params: {
     gameSession: toGameSession(updatedGameSession),
     room: null,
   };
+}
+
+export async function updateQuestionLabel(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  questionId: string;
+  labelText: string;
+  source: "manual" | "answer";
+  answerId?: string | null;
+}) {
+  assertSupabaseEnv();
+
+  const labelText = params.labelText.trim();
+
+  if (!labelText) {
+    throw new Error("标签不能为空。");
+  }
+
+  const { data: currentGameSession, error: currentError } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("当前游戏不在进行中。");
+  }
+
+  const { data: room, error: roomLoadError } = await supabase
+    .from("rooms")
+    .select("*")
+    .eq("id", currentGameSession.room_id)
+    .eq("current_presenter_player_id", params.presenterPlayerId)
+    .eq("current_game_id", currentGameSession.id)
+    .eq("game_status", "PLAYING")
+    .maybeSingle<DbRoom>();
+
+  if (roomLoadError) {
+    throw new Error(roomLoadError.message);
+  }
+
+  if (!room) {
+    throw new Error("只有当前出题人可以补充图片标签。");
+  }
+
+  const currentSession = toGameSession(currentGameSession);
+  const isReviewingQuestion =
+    !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
+
+  if (!isReviewingQuestion) {
+    throw new Error("只能在完整展示图片时补充标签。");
+  }
+
+  const { data: question, error: questionError } = await supabase
+    .from("questions")
+    .select("*")
+    .eq("id", params.questionId)
+    .eq("question_set_id", currentGameSession.question_set_id)
+    .eq("order_index", currentGameSession.current_question_index)
+    .maybeSingle<DbQuestion>();
+
+  if (questionError) {
+    throw new Error(questionError.message);
+  }
+
+  if (!question) {
+    throw new Error("没有找到当前图片。");
+  }
+
+  if (question.label_text?.trim()) {
+    throw new Error("这张图片已经有标签，不能覆盖。");
+  }
+
+  let sourceAnswerId: string | null = null;
+
+  if (params.source === "answer") {
+    if (!params.answerId) {
+      throw new Error("请选择一个玩家回答作为标签。");
+    }
+
+    const { data: answer, error: answerError } = await supabase
+      .from("answers")
+      .select("*")
+      .eq("id", params.answerId)
+      .eq("game_session_id", currentGameSession.id)
+      .eq("question_index", currentGameSession.current_question_index)
+      .maybeSingle<DbAnswer>();
+
+    if (answerError) {
+      throw new Error(answerError.message);
+    }
+
+    if (!answer) {
+      throw new Error("没有找到这个玩家回答。");
+    }
+
+    sourceAnswerId = answer.id;
+  }
+
+  const { data: updatedQuestion, error: updateError } = await supabase
+    .from("questions")
+    .update({
+      label_text: labelText,
+      label_source: params.source,
+      label_source_answer_id: sourceAnswerId,
+      label_updated_by_player_id: params.presenterPlayerId,
+      label_updated_at: new Date().toISOString(),
+    })
+    .eq("id", question.id)
+    .is("label_text", null)
+    .select()
+    .maybeSingle<DbQuestion>();
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  if (!updatedQuestion) {
+    throw new Error("标签保存失败，可能已经被其他人补充。");
+  }
+
+  return toQuestion(updatedQuestion);
 }
 
 export async function skipCurrentQuestion(params: {
