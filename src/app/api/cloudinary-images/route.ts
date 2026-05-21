@@ -10,10 +10,6 @@ type CloudinaryResource = {
   created_at?: string;
 };
 
-function buildOptimizedUrl(url: string) {
-  return url.replace("/image/upload/", "/image/upload/f_auto,q_auto/");
-}
-
 export async function GET() {
   const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
@@ -58,7 +54,7 @@ export async function GET() {
 
   const images = (data.resources ?? []).map((resource) => ({
     publicId: resource.public_id,
-    url: buildOptimizedUrl(resource.secure_url),
+    url: resource.secure_url,
     originalUrl: resource.secure_url,
     width: resource.width ?? null,
     height: resource.height ?? null,

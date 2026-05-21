@@ -137,3 +137,9 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 - 权限主要依赖前端判断和 Supabase 条件更新，适合 MVP 测试，不适合作为正式安全边界。
 - 房间不会自动过期清理。
 - 玩家关闭浏览器不一定立即从玩家列表移除。
+
+## Maintenance
+
+测试环境的旧房间和未发布题库可按需手动清理，SQL 见：
+
+- `docs/maintenance-cleanup.md`

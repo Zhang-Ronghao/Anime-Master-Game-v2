@@ -117,7 +117,7 @@ export async function uploadImagesToCloudinary(
       results.push({
         ok: true,
         path: item.path,
-        url: buildOptimizedUrl(uploaded.secureUrl),
+        url: uploaded.secureUrl,
         originalCloudinaryUrl: uploaded.secureUrl,
         publicId: uploaded.publicId,
         rawBytes: prepared.rawBytes,
@@ -306,10 +306,6 @@ async function uploadPreparedFile(prepared: PreparedImage) {
     secureUrl: data.secure_url,
     publicId: data.public_id ?? "",
   };
-}
-
-function buildOptimizedUrl(url: string) {
-  return url.replace("/image/upload/", "/image/upload/f_auto,q_auto/");
 }
 
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
