@@ -4,24 +4,88 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
+import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
+import { QuestionSetUploader } from "@/components/QuestionSetUploader";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import { supabase } from "@/lib/supabaseClient";
 import {
+  cancelCurrentRound,
   dissolveSupabaseRoom,
   getPlayersByRoomId,
   getRoomByCode,
   joinSupabaseRoom,
   leaveSupabaseRoom,
+  selectPresenterForRound,
 } from "@/lib/supabaseRooms";
-import type { Room } from "@/types/game";
+import type { DbRoom, Player, Room, RoomStatus } from "@/types/game";
 
-const statusText: Record<Room["status"], string> = {
-  LOBBY: "大厅等待中",
-  SELECTING_PRESENTER: "选择出题人",
-  PLAYING: "游戏进行中",
-  FINISHED: "本轮已结束",
+const statusText: Record<RoomStatus, string> = {
+  LOBBY: "房间大厅",
+  QUESTION_SETUP: "出题人准备题库",
+  PLAYING: "游戏中",
+  GAME_RESULT: "本轮结算",
 };
+
+function applyRoomMeta(currentRoom: Room | null, dbRoom: DbRoom): Room | null {
+  if (!currentRoom) {
+    return currentRoom;
+  }
+
+  return {
+    ...currentRoom,
+    hostPlayerId: dbRoom.host_player_id,
+    status: dbRoom.game_status,
+    currentPresenterPlayerId: dbRoom.current_presenter_player_id,
+    currentGameId: dbRoom.current_game_id,
+    updatedAt: dbRoom.updated_at,
+  };
+}
+
+function getPresenterName(players: Player[], presenterPlayerId?: string | null) {
+  return players.find((player) => player.id === presenterPlayerId)?.nickname ?? "未选择";
+}
+
+function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[]; playerId: string; presenterPlayerId?: string | null }) {
+  return (
+    <Panel title="玩家列表">
+      <div className="space-y-3">
+        {players.map((player) => {
+          const isPresenter = player.id === presenterPlayerId;
+
+          return (
+            <div
+              className="flex items-center justify-between rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
+              key={player.id}
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
+                  {player.nickname.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate font-semibold">{player.nickname}</p>
+                  <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+                    {player.id === playerId ? <span>当前标签页玩家</span> : null}
+                    {isPresenter ? <span>本轮出题人</span> : null}
+                  </div>
+                </div>
+              </div>
+              <span
+                className={
+                  player.isHost
+                    ? "rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
+                    : "rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
+                }
+              >
+                {player.isHost ? "房主" : "玩家"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
 
 export default function RoomPage() {
   const params = useParams<{ roomCode: string }>();
@@ -33,6 +97,8 @@ export default function RoomPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isDissolving, setIsDissolving] = useState(false);
+  const [pendingPresenterId, setPendingPresenterId] = useState("");
+  const [isCancelingRound, setIsCancelingRound] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -171,15 +237,20 @@ export default function RoomPage() {
       .on(
         "postgres_changes",
         {
-          event: "DELETE",
+          event: "*",
           schema: "public",
           table: "rooms",
           filter: `id=eq.${room.id}`,
         },
-        () => {
-          clearLocalRoomSession();
-          setRoom(null);
-          setError("房间已被房主解散。");
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            clearLocalRoomSession();
+            setRoom(null);
+            setError("房间已被房主解散。");
+            return;
+          }
+
+          setRoom((currentRoom) => applyRoomMeta(currentRoom, payload.new as DbRoom));
         },
       )
       .subscribe();
@@ -195,21 +266,24 @@ export default function RoomPage() {
   );
 
   const isHost = Boolean(currentPlayer?.isHost);
+  const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
+  const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
 
   async function handleBackHome() {
     try {
-      if (room?.id && playerId && !isHost) {
-        await leaveSupabaseRoom(room.id, playerId);
+      if (room?.id && playerId) {
+        if (isHost) {
+          await dissolveSupabaseRoom(room.id, playerId);
+        } else {
+          await leaveSupabaseRoom(room.id, playerId);
+        }
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试。");
       return;
     }
 
-    if (!isHost) {
-      clearLocalRoomSession();
-    }
-
+    clearLocalRoomSession();
     router.push("/");
   }
 
@@ -218,7 +292,7 @@ export default function RoomPage() {
       return;
     }
 
-    const confirmed = window.confirm("确定要解散房间吗？房间内所有玩家都会被移出。");
+    const confirmed = window.confirm("确定要解散房间吗？");
 
     if (!confirmed) {
       return;
@@ -235,6 +309,42 @@ export default function RoomPage() {
       setError(caughtError instanceof Error ? caughtError.message : "解散房间失败，请稍后重试。");
     } finally {
       setIsDissolving(false);
+    }
+  }
+
+  async function handleSelectPresenter(presenterPlayerId: string) {
+    if (!room?.id || !playerId || !isHost || room.status !== "LOBBY") {
+      return;
+    }
+
+    setPendingPresenterId(presenterPlayerId);
+    setError("");
+
+    try {
+      const nextRoom = await selectPresenterForRound(room.id, playerId, presenterPlayerId);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "选择出题人失败，请稍后重试。");
+    } finally {
+      setPendingPresenterId("");
+    }
+  }
+
+  async function handleCancelRound() {
+    if (!room?.id || !playerId || !isHost || room.status === "LOBBY") {
+      return;
+    }
+
+    setIsCancelingRound(true);
+    setError("");
+
+    try {
+      const nextRoom = await cancelCurrentRound(room.id, playerId);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "取消本轮失败，请稍后重试。");
+    } finally {
+      setIsCancelingRound(false);
     }
   }
 
@@ -268,62 +378,126 @@ export default function RoomPage() {
       </div>
 
       {error ? (
+        <>
+          <div className="fixed left-1/2 top-4 z-50 w-[calc(100vw-24px)] max-w-xl -translate-x-1/2 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 shadow-lg">
+            {error}
+          </div>
+          <div className="mb-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+        </>
+      ) : null}
+
+      {isLoading ? (
+        <Panel title="加载房间">
+          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Supabase 读取房间和玩家列表...</p>
+        </Panel>
+      ) : !room ? (
         <Panel title="无法加载房间">
-          <p className="text-sm leading-6 text-red-700">{error}</p>
+          <p className="text-sm leading-6 text-red-700">{error || "房间不存在或已被解散。"}</p>
           <Button className="mt-4" type="button" onClick={() => router.push("/")}>
             回到首页
           </Button>
         </Panel>
-      ) : isLoading ? (
-        <Panel title="加载房间">
-          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Supabase 读取房间和玩家列表...</p>
-        </Panel>
+      ) : room.status === "PLAYING" ? (
+        <main className="space-y-4">
+          <ImageRevealGame room={room} playerId={playerId} isPresenter={isCurrentPresenter} onError={setError} />
+          {isHost ? (
+            <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
+              {isCancelingRound ? "取消中..." : "取消本轮"}
+            </Button>
+          ) : null}
+        </main>
       ) : (
-        <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-          <Panel title="玩家列表">
-            <div className="space-y-3">
-              {room?.players.map((player) => (
-                <div
-                  className="flex items-center justify-between rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
-                  key={player.id}
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
-                      {player.nickname.slice(0, 1).toUpperCase()}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="truncate font-semibold">{player.nickname}</p>
-                      {player.id === playerId ? (
-                        <p className="mt-1 text-xs text-[var(--muted)]">当前标签页玩家</p>
-                      ) : null}
-                    </div>
-                  </div>
-                  {player.isHost ? (
-                    <span className="rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span>
-                  ) : (
-                    <span className="rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">玩家</span>
-                  )}
+        <div className={room.status === "QUESTION_SETUP" ? "grid gap-5" : "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]"}>
+          {room.status === "LOBBY" || room.status === "GAME_RESULT" ? (
+            <PlayerList players={room.players} playerId={playerId} presenterPlayerId={room.currentPresenterPlayerId} />
+          ) : null}
+
+          <div className="space-y-5">
+            <Panel title="当前游戏状态">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+                  <p className="text-sm text-[var(--muted)]">状态</p>
+                  <p className="mt-2 text-xl font-semibold">{statusText[room.status]}</p>
                 </div>
-              ))}
-            </div>
-          </Panel>
-
-          <Panel title="当前游戏状态">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-                <p className="text-sm text-[var(--muted)]">状态</p>
-                <p className="mt-2 text-xl font-semibold">{room ? statusText[room.status] : "加载中"}</p>
+                <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+                  <p className="text-sm text-[var(--muted)]">本轮出题人</p>
+                  <p className="mt-2 text-xl font-semibold">{presenterName}</p>
+                </div>
               </div>
-              <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-                <p className="text-sm text-[var(--muted)]">房主权限</p>
-                <p className="mt-2 text-xl font-semibold">{isHost ? "当前玩家是房主" : "当前玩家不是房主"}</p>
-              </div>
-            </div>
 
-            <div className="mt-5 rounded-md border border-dashed border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
-              本阶段已接入 Supabase。玩家列表来自数据库，并通过 Supabase Realtime 订阅 players 表变化。
-            </div>
-          </Panel>
+              {room.status === "QUESTION_SETUP" ? (
+                <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6">
+                  {isCurrentPresenter ? (
+                    <QuestionSetUploader
+                      room={room}
+                      presenterPlayerId={playerId}
+                      onRoomUpdated={(nextRoom) =>
+                        setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
+                      }
+                      onError={setError}
+                      onClearError={() => setError("")}
+                    />
+                  ) : (
+                    <p className="font-semibold text-slate-900">等待出题人准备题库。</p>
+                  )}
+                  {isHost ? (
+                    <Button
+                      className="mt-4"
+                      type="button"
+                      variant="secondary"
+                      onClick={handleCancelRound}
+                      disabled={isCancelingRound}
+                    >
+                      {isCancelingRound ? "取消中..." : "取消本轮"}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {room.status === "GAME_RESULT" ? (
+                <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
+                  本轮结算已生成。
+                  {isHost ? (
+                    <Button
+                      className="mt-4"
+                      type="button"
+                      variant="secondary"
+                      onClick={handleCancelRound}
+                      disabled={isCancelingRound}
+                    >
+                      {isCancelingRound ? "取消中..." : "取消本轮"}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </Panel>
+
+            {isHost && room.status === "LOBBY" ? (
+              <Panel title="选择出题人">
+                <div className="space-y-3">
+                  {room.players.map((player) => (
+                    <button
+                      className="flex w-full items-center justify-between rounded-md border border-[var(--line)] bg-white px-4 py-3 text-left transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={Boolean(pendingPresenterId)}
+                      key={player.id}
+                      type="button"
+                      onClick={() => handleSelectPresenter(player.id)}
+                    >
+                      <span>
+                        <span className="block font-semibold text-slate-950">{player.nickname}</span>
+                        <span className="mt-1 block text-xs text-[var(--muted)]">
+                          {player.isHost ? "房主也可以作为出题人" : "玩家"}
+                        </span>
+                      </span>
+                      <span className="text-sm font-semibold text-[var(--primary)]">
+                        {pendingPresenterId === player.id ? "选择中..." : "选择"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </Panel>
+            ) : null}
+          </div>
         </div>
       )}
     </AppShell>

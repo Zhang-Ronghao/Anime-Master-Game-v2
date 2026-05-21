@@ -15,3 +15,12 @@ export const supabase = createClient(
   supabaseUrl ?? "https://placeholder.supabase.co",
   supabaseAnonKey ?? "placeholder-anon-key",
 );
+
+export function getSupabasePublicConfig() {
+  assertSupabaseEnv();
+
+  return {
+    supabaseUrl: supabaseUrl as string,
+    supabaseAnonKey: supabaseAnonKey as string,
+  };
+}
