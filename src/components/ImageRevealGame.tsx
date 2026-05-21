@@ -551,7 +551,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       <div className="bg-white">
         <div
           className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
-          style={{ aspectRatio: imageAspectRatio }}
+          style={{
+            aspectRatio: imageAspectRatio,
+            maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
+          }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
