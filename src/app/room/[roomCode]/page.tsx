@@ -12,13 +12,15 @@ import { supabase } from "@/lib/supabaseClient";
 import {
   cancelCurrentRound,
   dissolveSupabaseRoom,
+  getLeaderboardForGameSession,
   getPlayersByRoomId,
   getRoomByCode,
   joinSupabaseRoom,
   leaveSupabaseRoom,
+  returnRoomToLobby,
   selectPresenterForRound,
 } from "@/lib/supabaseRooms";
-import type { DbRoom, Player, Room, RoomStatus } from "@/types/game";
+import type { DbRoom, LeaderboardEntry, Player, Room, RoomStatus } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -87,6 +89,98 @@ function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[
   );
 }
 
+function GameResultPanel({
+  currentGameId,
+  isHost,
+  isReturningToLobby,
+  onReturnToLobby,
+  onError,
+}: {
+  currentGameId?: string | null;
+  isHost: boolean;
+  isReturningToLobby: boolean;
+  onReturnToLobby: () => void;
+  onError: (message: string) => void;
+}) {
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadLeaderboard() {
+      if (!currentGameId) {
+        setLeaderboard([]);
+        return;
+      }
+
+      setIsLoadingLeaderboard(true);
+      try {
+        const nextLeaderboard = await getLeaderboardForGameSession(currentGameId);
+
+        if (isMounted) {
+          setLeaderboard(nextLeaderboard);
+        }
+      } catch (caughtError) {
+        if (isMounted) {
+          onError(caughtError instanceof Error ? caughtError.message : "加载排行榜失败。");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingLeaderboard(false);
+        }
+      }
+    }
+
+    loadLeaderboard();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentGameId, onError]);
+
+  return (
+    <Panel title="最终排行榜">
+      {isLoadingLeaderboard ? (
+        <p className="text-sm text-[var(--muted)]">正在读取本轮分数...</p>
+      ) : leaderboard.length === 0 ? (
+        <p className="text-sm text-[var(--muted)]">本轮没有玩家得分。</p>
+      ) : (
+        <div className="overflow-hidden rounded-md border border-[var(--line)]">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-xs uppercase text-[var(--muted)]">
+              <tr>
+                <th className="px-4 py-3">排名</th>
+                <th className="px-4 py-3">玩家昵称</th>
+                <th className="px-4 py-3">总分</th>
+                <th className="px-4 py-3">答对题数</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--line)] bg-white">
+              {leaderboard.map((entry) => (
+                <tr key={entry.playerId}>
+                  <td className="px-4 py-3 font-semibold text-slate-950">{entry.rank}</td>
+                  <td className="px-4 py-3">{entry.nickname}</td>
+                  <td className="px-4 py-3 font-semibold">{entry.score}</td>
+                  <td className="px-4 py-3">{entry.correctCount}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {isHost ? (
+        <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+          {isReturningToLobby ? "返回中..." : "回到房间大厅"}
+        </Button>
+      ) : (
+        <p className="mt-4 text-sm text-[var(--muted)]">等待房主回到房间大厅。</p>
+      )}
+    </Panel>
+  );
+}
+
 export default function RoomPage() {
   const params = useParams<{ roomCode: string }>();
   const router = useRouter();
@@ -99,6 +193,7 @@ export default function RoomPage() {
   const [isDissolving, setIsDissolving] = useState(false);
   const [pendingPresenterId, setPendingPresenterId] = useState("");
   const [isCancelingRound, setIsCancelingRound] = useState(false);
+  const [isReturningToLobby, setIsReturningToLobby] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -348,6 +443,24 @@ export default function RoomPage() {
     }
   }
 
+  async function handleReturnToLobby() {
+    if (!room?.id || !playerId || !isHost || room.status !== "GAME_RESULT") {
+      return;
+    }
+
+    setIsReturningToLobby(true);
+    setError("");
+
+    try {
+      const nextRoom = await returnRoomToLobby(room.id, playerId);
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "回到房间大厅失败，请稍后重试。");
+    } finally {
+      setIsReturningToLobby(false);
+    }
+  }
+
   return (
     <AppShell>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -463,22 +576,21 @@ export default function RoomPage() {
               ) : null}
 
               {room.status === "GAME_RESULT" ? (
-                <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
-                  本轮结算已生成。
-                  {isHost ? (
-                    <Button
-                      className="mt-4"
-                      type="button"
-                      variant="secondary"
-                      onClick={handleCancelRound}
-                      disabled={isCancelingRound}
-                    >
-                      {isCancelingRound ? "取消中..." : "取消本轮"}
-                    </Button>
-                  ) : null}
-                </div>
+                <p className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
+                  本轮结算已生成，分数只统计当前 game_session。
+                </p>
               ) : null}
             </Panel>
+
+            {room.status === "GAME_RESULT" ? (
+              <GameResultPanel
+                currentGameId={room.currentGameId}
+                isHost={isHost}
+                isReturningToLobby={isReturningToLobby}
+                onReturnToLobby={handleReturnToLobby}
+                onError={setError}
+              />
+            ) : null}
 
             {isHost && room.status === "LOBBY" ? (
               <Panel title="选择出题人">

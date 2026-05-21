@@ -100,6 +100,14 @@ export type PlayerScore = {
   correctCount: number;
 };
 
+export type LeaderboardEntry = {
+  playerId: string;
+  nickname: string;
+  rank: number;
+  score: number;
+  correctCount: number;
+};
+
 export type QuestionResult = {
   id: string;
   gameSessionId: string;

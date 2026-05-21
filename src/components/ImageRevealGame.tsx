@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/Button";
 import { supabase } from "@/lib/supabaseClient";
 import {
+  advanceReviewedQuestion,
   confirmRevealBlocks,
+  endCurrentGameEarly,
   getAnswerForPlayerRound,
   getAnswersForQuestionRound,
   getGameSessionById,
@@ -78,6 +80,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [isGrading, setIsGrading] = useState(false);
+  const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
+  const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
 
@@ -272,6 +276,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
+  const isQuestionReviewing = !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
+  const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
   const scoreRows = room.players
@@ -286,11 +292,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     isPresenter &&
     selectedBlocks.length > 0 &&
     !isConfirmingReveal &&
+    !isQuestionReviewing &&
     Boolean(gameSession) &&
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
-  const canSubmitAnswer = !isPresenter && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
-  const canGrade = isPresenter && hasRoundStarted && Boolean(gameSession);
+  const canSubmitAnswer =
+    !isPresenter && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
+  const canGrade = isPresenter && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
 
   function toggleBlock(blockIndex: number) {
     if (
@@ -428,6 +436,60 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function handleAdvanceReviewedQuestion() {
+    if (!gameSession || !isPresenter || !isQuestionReviewing) {
+      return;
+    }
+
+    setIsAdvancingQuestion(true);
+    try {
+      const advanced = await advanceReviewedQuestion({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+      });
+      setGameSession(advanced.gameSession);
+      setSelectedBlocks([]);
+      setSelectedCorrectPlayerIds([]);
+      setRemainingSeconds(getRemainingSeconds(advanced.gameSession.roundStartedAt, advanced.gameSession.roundSeconds));
+
+      if (advanced.room) {
+        onRoomUpdated?.(advanced.room);
+      }
+
+      await refreshRoundData(advanced.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "切换图片失败。");
+    } finally {
+      setIsAdvancingQuestion(false);
+    }
+  }
+
+  async function handleEndGameEarly() {
+    if (!gameSession) {
+      return;
+    }
+
+    const confirmed = window.confirm("确定要提前结束本轮游戏并进入排行榜吗？");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsEndingGame(true);
+    try {
+      const ended = await endCurrentGameEarly({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+      });
+      setGameSession(ended.gameSession);
+      onRoomUpdated?.(ended.room);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提前结束本轮失败。");
+    } finally {
+      setIsEndingGame(false);
+    }
+  }
+
   if (isLoading) {
     return <p className="text-sm text-[var(--muted)]">正在加载当前题目...</p>;
   }
@@ -521,7 +583,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       </div>
 
-      {isPresenter ? (
+      {isQuestionReviewing ? (
+        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+          <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
+          </p>
+          {isPresenter ? (
+            <Button className="mt-3" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
+              {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}
+            </Button>
+          ) : null}
+        </div>
+      ) : isPresenter ? (
         <>
           <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
             <p className="text-sm text-[var(--muted)]">
@@ -536,6 +610,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               </Button>
               <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
                 {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+              </Button>
+              <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
+                {isEndingGame ? "结束中..." : "结束本轮游戏"}
               </Button>
             </div>
           </div>
