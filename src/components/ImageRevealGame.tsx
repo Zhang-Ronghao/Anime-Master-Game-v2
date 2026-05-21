@@ -515,6 +515,183 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     return <p className="text-sm text-red-700">没有找到当前游戏题目。</p>;
   }
 
+  const scorePanel = (
+    <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+      <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+        {scoreRows.map(({ player, score, correctCount }, index) => (
+          <div className="rounded-md bg-slate-50 px-3 py-2 text-sm" key={player.id}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 font-semibold text-slate-950">
+                #{index + 1} {player.nickname}
+              </div>
+              <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
+            </div>
+            <div className="mt-1 text-[var(--muted)]">答对 {correctCount} 题</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const imagePanel = (
+    <div className="bg-white">
+      <div
+        className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
+        style={{
+          aspectRatio: imageAspectRatio,
+          maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
+        }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          alt=""
+          className="h-full w-full object-cover"
+          src={currentQuestion.imageUrl}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+              setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+              setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+            }
+          }}
+          onError={() => setImageLoadFailed(true)}
+        />
+
+        {imageLoadFailed ? (
+          <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
+            <div>
+              <p className="text-lg font-semibold">图片加载失败</p>
+              <p className="mt-2 text-sm text-slate-300">可能是图片 URL 失效、跨域限制或网络异常。</p>
+              {isPresenter ? (
+                <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+                  {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {!isPresenter && !imageLoadFailed ? (
+          <div
+            className="absolute inset-0 grid"
+            style={{
+              gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+              gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+            }}
+          >
+            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+              <div className={revealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
+            ))}
+          </div>
+        ) : null}
+
+        {isPresenter && !imageLoadFailed ? (
+          <div
+            className="absolute inset-0 grid"
+            style={{
+              gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+              gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+            }}
+          >
+            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
+              const isRevealed = revealedBlockSet.has(blockIndex);
+              const isSelected = selectedBlockSet.has(blockIndex);
+
+              return (
+                <button
+                  aria-label={`块 ${blockIndex + 1}`}
+                  className={[
+                    "border border-white/60 transition",
+                    isRevealed ? "bg-emerald-400/30" : "",
+                    isSelected ? "bg-rose-500/45" : "",
+                    !isRevealed && !isSelected ? "hover:bg-rose-300/25" : "",
+                  ].join(" ")}
+                  disabled={isRevealed || (Boolean(gameSession.roundStartedAt) && remainingSeconds > 0)}
+                  key={blockIndex}
+                  type="button"
+                  onClick={() => toggleBlock(blockIndex)}
+                />
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const actionPanel = (
+    <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+      {isQuestionReviewing ? (
+        <>
+          <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
+          </p>
+          {isPresenter ? (
+            <Button className="mt-3 w-full" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
+              {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}
+            </Button>
+          ) : null}
+        </>
+      ) : isPresenter ? (
+        <>
+          <p className="text-sm font-semibold text-slate-950">出题人操作</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            已揭露 {revealedBlockSet.size} / {TOTAL_BLOCKS} 块，本轮已选择 {selectedBlocks.length} 块。
+          </p>
+          <div className="mt-3 grid gap-2">
+            <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
+              {isConfirmingReveal ? "确认中..." : "确认揭露"}
+            </Button>
+            <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
+              判分
+            </Button>
+            <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+              {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+            </Button>
+            <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
+              {isEndingGame ? "结束中..." : "结束本轮游戏"}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm">
+            <span className="text-[var(--muted)]">倒计时</span>
+            <span className="font-semibold text-slate-950">{hasRoundStarted ? `${remainingSeconds} 秒` : "等待开始"}</span>
+          </div>
+          {isCurrentPlayerCorrect ? (
+            <p className="text-sm font-semibold text-emerald-700">你已答对本题，后续轮次无需继续作答。</p>
+          ) : !hasRoundStarted ? (
+            <p className="text-sm text-[var(--muted)]">等待出题人揭露图片后开始答题。</p>
+          ) : (
+            <div className="space-y-3">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
+                <input
+                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  disabled={!isRoundActive}
+                  maxLength={80}
+                  placeholder="输入动画名称"
+                  value={answerText}
+                  onChange={(event) => setAnswerText(event.target.value)}
+                />
+              </label>
+              <Button className="w-full" type="button" onClick={handleSubmitAnswer} disabled={!canSubmitAnswer || isSubmittingAnswer}>
+                {isSubmittingAnswer ? "提交中..." : myAnswer ? "修改答案" : "提交答案"}
+              </Button>
+              <p className="text-sm text-[var(--muted)]">
+                {myAnswer ? `已提交：${myAnswer.answerText}` : "本轮尚未提交答案"}
+                {isRoundEnded ? "，本轮已结束" : ""}
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       <div className="grid gap-3 text-sm sm:grid-cols-5">
@@ -546,234 +723,71 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       </div>
 
-      <div className="rounded-md border border-[var(--line)] bg-white p-3">
-        <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          {scoreRows.map(({ player, score, correctCount }) => (
-            <div className="rounded-md bg-slate-50 px-3 py-2 text-sm" key={player.id}>
-              <div className="font-semibold text-slate-950">{player.nickname}</div>
-              <div className="text-[var(--muted)]">
-                {score} 分，答对 {correctCount} 题
-              </div>
-            </div>
-          ))}
-        </div>
+      <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)_280px] xl:grid-cols-[260px_minmax(0,1fr)_320px]">
+        {scorePanel}
+        <div className="min-w-0">{imagePanel}</div>
+        {actionPanel}
       </div>
 
-      <div className="bg-white">
-        <div
-          className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
-          style={{
-            aspectRatio: imageAspectRatio,
-            maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
-          }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            alt=""
-            className="h-full w-full object-cover"
-            src={currentQuestion.imageUrl}
-            onLoad={(event) => {
-              const image = event.currentTarget;
-              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-                setImageAspectRatio(image.naturalWidth / image.naturalHeight);
-                setIsPortraitImage(image.naturalHeight > image.naturalWidth);
-              }
-            }}
-            onError={() => setImageLoadFailed(true)}
-          />
-
-          {imageLoadFailed ? (
-            <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
+      {isJudgeModalOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
+          <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
+            <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-center">
               <div>
-                <p className="text-lg font-semibold">图片加载失败</p>
-                <p className="mt-2 text-sm text-slate-300">可能是图片 URL 失效、跨域限制或网络异常。</p>
-                {isPresenter ? (
-                  <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-                    {isSkippingQuestion ? "跳过中..." : "跳过本题"}
-                  </Button>
-                ) : null}
+                <p className="text-lg font-semibold text-slate-950">本轮答案与判分</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  可以随时勾选答对玩家并确认判分。未勾选也可以确认，用于进入下一轮。
+                </p>
               </div>
+              <button
+                className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
+                type="button"
+                onClick={() => setIsJudgeModalOpen(false)}
+              >
+                关闭
+              </button>
             </div>
-          ) : null}
 
-          {!isPresenter && !imageLoadFailed ? (
-            <div
-              className="absolute inset-0 grid"
-              style={{
-                gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
-              }}
-            >
-              {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
-                <div className={revealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
-              ))}
-            </div>
-          ) : null}
-
-          {isPresenter && !imageLoadFailed ? (
-            <div
-              className="absolute inset-0 grid"
-              style={{
-                gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
-              }}
-            >
-              {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
-                const isRevealed = revealedBlockSet.has(blockIndex);
-                const isSelected = selectedBlockSet.has(blockIndex);
+            <div className="max-h-[60vh] space-y-2 overflow-y-auto px-5 py-4">
+              {guessers.map((player) => {
+                const answer = answers.find((item) => item.playerId === player.id);
+                const alreadyCorrect = correctPlayerSet.has(player.id);
 
                 return (
-                  <button
-                    aria-label={`块 ${blockIndex + 1}`}
-                    className={[
-                      "border border-white/60 transition",
-                      isRevealed ? "bg-emerald-400/30" : "",
-                      isSelected ? "bg-rose-500/45" : "",
-                      !isRevealed && !isSelected ? "hover:bg-rose-300/25" : "",
-                    ].join(" ")}
-                    disabled={isRevealed || (Boolean(gameSession.roundStartedAt) && remainingSeconds > 0)}
-                    key={blockIndex}
-                    type="button"
-                    onClick={() => toggleBlock(blockIndex)}
-                  />
+                  <label
+                    className="flex items-start gap-3 rounded-md border border-[var(--line)] bg-slate-50 p-3 text-sm"
+                    key={player.id}
+                  >
+                    <input
+                      className="mt-1"
+                      type="checkbox"
+                      checked={alreadyCorrect || selectedCorrectPlayerIds.includes(player.id)}
+                      disabled={alreadyCorrect || !hasRoundStarted}
+                      onChange={() => toggleCorrectPlayer(player.id)}
+                    />
+                    <span>
+                      <span className="block font-semibold text-slate-950">
+                        {player.nickname}
+                        {alreadyCorrect ? "（已答对）" : ""}
+                      </span>
+                      <span className="mt-1 block text-[var(--muted)]">{answer?.answerText || "本轮未提交"}</span>
+                    </span>
+                  </label>
                 );
               })}
             </div>
-          ) : null}
-        </div>
-      </div>
 
-      {isQuestionReviewing ? (
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-          <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
-          </p>
-          {isPresenter ? (
-            <Button className="mt-3" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
-              {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}
-            </Button>
-          ) : null}
-        </div>
-      ) : isPresenter ? (
-        <>
-          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-            <p className="text-sm text-[var(--muted)]">
-              已揭露 {revealedBlockSet.size} / {TOTAL_BLOCKS} 块，本轮已选择 {selectedBlocks.length} 块。
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-                {isConfirmingReveal ? "确认中..." : "确认揭露"}
-              </Button>
-              <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
-                判分
-              </Button>
-              <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-                {isSkippingQuestion ? "跳过中..." : "跳过本题"}
-              </Button>
-              <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-                {isEndingGame ? "结束中..." : "结束本轮游戏"}
+            <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
+              <p className="text-sm text-[var(--muted)]">
+                已选择 {selectedCorrectPlayerIds.length} 名玩家，本轮分值 {currentScore} 分。
+              </p>
+              <Button type="button" onClick={handleGradeAnswers} disabled={!canGrade || isGrading}>
+                {isGrading ? "判分中..." : "确认判分"}
               </Button>
             </div>
           </div>
-
-          {isJudgeModalOpen ? (
-            <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
-              <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
-                <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-center">
-                  <div>
-                    <p className="text-lg font-semibold text-slate-950">本轮答案与判分</p>
-                    <p className="mt-1 text-sm text-[var(--muted)]">
-                      可以随时勾选答对玩家并确认判分。未勾选也可以确认，用于进入下一轮。
-                    </p>
-                  </div>
-                  <button
-                    className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
-                    type="button"
-                    onClick={() => setIsJudgeModalOpen(false)}
-                  >
-                    关闭
-                  </button>
-                </div>
-
-                <div className="max-h-[60vh] space-y-2 overflow-y-auto px-5 py-4">
-                  {guessers.map((player) => {
-                    const answer = answers.find((item) => item.playerId === player.id);
-                    const alreadyCorrect = correctPlayerSet.has(player.id);
-
-                    return (
-                      <label
-                        className="flex items-start gap-3 rounded-md border border-[var(--line)] bg-slate-50 p-3 text-sm"
-                        key={player.id}
-                      >
-                        <input
-                          className="mt-1"
-                          type="checkbox"
-                          checked={alreadyCorrect || selectedCorrectPlayerIds.includes(player.id)}
-                          disabled={alreadyCorrect || !hasRoundStarted}
-                          onChange={() => toggleCorrectPlayer(player.id)}
-                        />
-                        <span>
-                          <span className="block font-semibold text-slate-950">
-                            {player.nickname}
-                            {alreadyCorrect ? "（已答对）" : ""}
-                          </span>
-                          <span className="mt-1 block text-[var(--muted)]">{answer?.answerText || "本轮未提交"}</span>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-
-                <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
-                  <p className="text-sm text-[var(--muted)]">
-                    已选择 {selectedCorrectPlayerIds.length} 名玩家，本轮分值 {currentScore} 分。
-                  </p>
-                  <Button type="button" onClick={handleGradeAnswers} disabled={!canGrade || isGrading}>
-                    {isGrading ? "判分中..." : "确认判分"}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </>
-      ) : (
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-          <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm">
-            <span className="text-[var(--muted)]">倒计时</span>
-            <span className="font-semibold text-slate-950">{hasRoundStarted ? `${remainingSeconds} 秒` : "等待开始"}</span>
-          </div>
-          {isCurrentPlayerCorrect ? (
-            <p className="text-sm font-semibold text-emerald-700">你已答对本题，后续轮次无需继续作答。</p>
-          ) : !hasRoundStarted ? (
-            <p className="text-sm text-[var(--muted)]">等待出题人揭露图片后开始答题。</p>
-          ) : (
-            <div className="space-y-3">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
-                <input
-                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  disabled={!isRoundActive}
-                  maxLength={80}
-                  placeholder="输入动画名称"
-                  value={answerText}
-                  onChange={(event) => setAnswerText(event.target.value)}
-                />
-              </label>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Button type="button" onClick={handleSubmitAnswer} disabled={!canSubmitAnswer || isSubmittingAnswer}>
-                  {isSubmittingAnswer ? "提交中..." : myAnswer ? "修改答案" : "提交答案"}
-                </Button>
-                <p className="text-sm text-[var(--muted)]">
-                  {myAnswer ? `已提交：${myAnswer.answerText}` : "本轮尚未提交答案"}
-                  {isRoundEnded ? "，本轮已结束" : ""}
-                </p>
-              </div>
-            </div>
-          )}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

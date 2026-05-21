@@ -23,6 +23,11 @@ import type { QuestionSet, Room } from "@/types/game";
 type QuestionSetUploaderProps = {
   room: Room;
   presenterPlayerId: string;
+  gameSettings: {
+    maxRevealRounds: number;
+    roundSeconds: number;
+    roundScores: number[];
+  };
   onRoomUpdated: (room: Room) => void;
   onError: (message: string) => void;
   onClearError?: () => void;
@@ -61,6 +66,7 @@ function getQuestionSetUrls(questionSet: QuestionSet | null) {
 export function QuestionSetUploader({
   room,
   presenterPlayerId,
+  gameSettings,
   onRoomUpdated,
   onError,
   onClearError,
@@ -81,9 +87,6 @@ export function QuestionSetUploader({
   const [communitySearch, setCommunitySearch] = useState("");
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
   const [isStartingGame, setIsStartingGame] = useState(false);
-  const [maxRevealRounds, setMaxRevealRounds] = useState(3);
-  const [roundSeconds, setRoundSeconds] = useState(30);
-  const [roundScores, setRoundScores] = useState<number[]>([3, 2, 1]);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
   const [results, setResults] = useState<CloudinaryUploadItemResult[]>([]);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
@@ -292,9 +295,9 @@ export function QuestionSetUploader({
         roomId: room.id,
         presenterPlayerId,
         questionSetId: questionSet.id,
-        maxRevealRounds,
-        roundSeconds,
-        roundScores,
+        maxRevealRounds: gameSettings.maxRevealRounds,
+        roundSeconds: gameSettings.roundSeconds,
+        roundScores: gameSettings.roundScores,
       });
       clearError();
       onRoomUpdated({ ...room, ...started.room, players: room.players });
@@ -310,7 +313,7 @@ export function QuestionSetUploader({
       <div>
         <p className="font-semibold text-slate-900">你是本轮出题人，请准备题库。</p>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          上传图片会保存上传后的 Cloudinary URL；粘贴已有 URL 不会重新上传或复制图片。
+          选择一种题库来源，创建或选中题库后检查预览，再点击“开始游戏”。游戏轮数和倒计时在上方“本轮游戏设置”里调整。
         </p>
       </div>
 
@@ -355,59 +358,6 @@ export function QuestionSetUploader({
             onChange={(event) => setDescription(event.target.value)}
           />
         </label>
-      </div>
-
-      <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-        <p className="font-semibold text-slate-900">游戏参数</p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">揭露轮数</span>
-            <input
-              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              min={1}
-              max={10}
-              type="number"
-              value={maxRevealRounds}
-              onChange={(event) => {
-                const nextRounds = Math.max(1, Math.min(10, Number(event.target.value) || 1));
-                setMaxRevealRounds(nextRounds);
-                setRoundScores((currentScores) =>
-                  Array.from({ length: nextRounds }, (_, index) => currentScores[index] ?? Math.max(1, nextRounds - index)),
-                );
-              }}
-            />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">每轮倒计时（秒）</span>
-            <input
-              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              min={1}
-              max={600}
-              type="number"
-              value={roundSeconds}
-              onChange={(event) => setRoundSeconds(Math.max(1, Math.min(600, Number(event.target.value) || 30)))}
-            />
-          </label>
-        </div>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          {Array.from({ length: maxRevealRounds }, (_, index) => (
-            <label className="block" key={index}>
-              <span className="mb-2 block text-sm font-medium text-slate-900">第 {index + 1} 轮分数</span>
-              <input
-                className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                min={0}
-                type="number"
-                value={roundScores[index] ?? 0}
-                onChange={(event) => {
-                  const nextScore = Math.max(0, Number(event.target.value) || 0);
-                  setRoundScores((currentScores) =>
-                    currentScores.map((score, scoreIndex) => (scoreIndex === index ? nextScore : score)),
-                  );
-                }}
-              />
-            </label>
-          ))}
-        </div>
       </div>
 
       {mode === "upload" ? (

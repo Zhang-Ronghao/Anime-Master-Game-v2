@@ -33,6 +33,12 @@ const statusText: Record<RoomStatus, string> = {
   GAME_RESULT: "本轮结算",
 };
 
+type GameSettings = {
+  maxRevealRounds: number;
+  roundSeconds: number;
+  roundScores: number[];
+};
+
 function applyRoomMeta(currentRoom: Room | null, dbRoom: DbRoom): Room | null {
   if (!currentRoom) {
     return currentRoom;
@@ -89,6 +95,102 @@ function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[
           );
         })}
       </div>
+    </Panel>
+  );
+}
+
+function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: boolean; isCurrentPresenter: boolean }) {
+  let text = "等待房主选择本轮出题人。";
+
+  if (room.status === "LOBBY") {
+    text = isHost ? "先在大厅设置本轮参数，然后选择一名出题人。" : "等待房主设置参数并选择出题人。";
+  } else if (room.status === "QUESTION_SETUP") {
+    text = isCurrentPresenter
+      ? "确认本轮游戏设置，选择上传、URL 文本或社区题库，创建题库预览后开始游戏。"
+      : "等待出题人准备题库并开始游戏。";
+  } else if (room.status === "GAME_RESULT") {
+    text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一轮。" : "查看排行榜并评分，等待房主回到大厅。";
+  }
+
+  return <p className="mt-4 rounded-md border border-rose-100 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">{text}</p>;
+}
+
+function GameSettingsPanel({
+  settings,
+  canEdit,
+  onChange,
+}: {
+  settings: GameSettings;
+  canEdit: boolean;
+  onChange: (settings: GameSettings) => void;
+}) {
+  function updateRounds(nextRounds: number) {
+    onChange({
+      ...settings,
+      maxRevealRounds: nextRounds,
+      roundScores: Array.from(
+        { length: nextRounds },
+        (_, index) => settings.roundScores[index] ?? Math.max(1, nextRounds - index),
+      ),
+    });
+  }
+
+  function updateScore(index: number, score: number) {
+    onChange({
+      ...settings,
+      roundScores: settings.roundScores.map((currentScore, scoreIndex) => (scoreIndex === index ? score : currentScore)),
+    });
+  }
+
+  return (
+    <Panel title="本轮游戏设置">
+      <p className="text-sm leading-6 text-[var(--muted)]">
+        这里设置揭露轮数、每轮倒计时和每轮答对分数。设置会在出题人点击“开始游戏”时写入本轮游戏。
+      </p>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium text-slate-900">揭露轮数</span>
+          <input
+            className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+            disabled={!canEdit}
+            min={1}
+            max={10}
+            type="number"
+            value={settings.maxRevealRounds}
+            onChange={(event) => updateRounds(Math.max(1, Math.min(10, Number(event.target.value) || 1)))}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium text-slate-900">每轮倒计时（秒）</span>
+          <input
+            className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+            disabled={!canEdit}
+            min={1}
+            max={600}
+            type="number"
+            value={settings.roundSeconds}
+            onChange={(event) =>
+              onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 30)) })
+            }
+          />
+        </label>
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        {Array.from({ length: settings.maxRevealRounds }, (_, index) => (
+          <label className="block" key={index}>
+            <span className="mb-2 block text-sm font-medium text-slate-900">第 {index + 1} 轮分数</span>
+            <input
+              className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+              disabled={!canEdit}
+              min={0}
+              type="number"
+              value={settings.roundScores[index] ?? 0}
+              onChange={(event) => updateScore(index, Math.max(0, Number(event.target.value) || 0))}
+            />
+          </label>
+        ))}
+      </div>
+      {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前阶段你只能查看设置，不能修改。</p> : null}
     </Panel>
   );
 }
@@ -157,6 +259,42 @@ function GameResultPanel({
       isMounted = false;
     };
   }, [currentGameId, onError]);
+
+  useEffect(() => {
+    if (!questionSet?.id) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`question-set:${questionSet.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "question_sets",
+          filter: `id=eq.${questionSet.id}`,
+        },
+        () => {
+          getQuestionSetById(questionSet.id)
+            .then((nextQuestionSet) => {
+              if (nextQuestionSet) {
+                setQuestionSet(nextQuestionSet);
+                setPublishTitle(nextQuestionSet.title);
+                setPublishDescription(nextQuestionSet.description ?? "");
+              }
+            })
+            .catch((caughtError) => {
+              onError(caughtError instanceof Error ? caughtError.message : "刷新题库状态失败。");
+            });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [onError, questionSet?.id]);
 
   async function handlePublishQuestionSet() {
     if (!questionSet) {
@@ -310,6 +448,11 @@ export default function RoomPage() {
   const [pendingPresenterId, setPendingPresenterId] = useState("");
   const [isCancelingRound, setIsCancelingRound] = useState(false);
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
+  const [gameSettings, setGameSettings] = useState<GameSettings>({
+    maxRevealRounds: 3,
+    roundSeconds: 30,
+    roundScores: [3, 2, 1],
+  });
 
   useEffect(() => {
     let isMounted = true;
@@ -650,6 +793,14 @@ export default function RoomPage() {
           ) : null}
 
           <div className="space-y-5">
+            {room.status === "LOBBY" || room.status === "QUESTION_SETUP" ? (
+              <GameSettingsPanel
+                settings={gameSettings}
+                canEdit={(room.status === "LOBBY" && isHost) || (room.status === "QUESTION_SETUP" && isCurrentPresenter)}
+                onChange={setGameSettings}
+              />
+            ) : null}
+
             <Panel title="当前游戏状态">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
@@ -661,6 +812,7 @@ export default function RoomPage() {
                   <p className="mt-2 text-xl font-semibold">{presenterName}</p>
                 </div>
               </div>
+              <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
 
               {room.status === "QUESTION_SETUP" ? (
                 <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6">
@@ -668,6 +820,7 @@ export default function RoomPage() {
                     <QuestionSetUploader
                       room={room}
                       presenterPlayerId={playerId}
+                      gameSettings={gameSettings}
                       onRoomUpdated={(nextRoom) =>
                         setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
                       }
