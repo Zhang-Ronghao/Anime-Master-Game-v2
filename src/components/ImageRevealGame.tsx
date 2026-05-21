@@ -27,8 +27,9 @@ type ImageRevealGameProps = {
   onRoomUpdated?: (room: Room) => void;
 };
 
-const GRID_COLUMNS = 7;
-const TOTAL_BLOCKS = 28;
+const LANDSCAPE_GRID_COLUMNS = 9;
+const PORTRAIT_GRID_COLUMNS = 5;
+const TOTAL_BLOCKS = 45;
 const DEFAULT_ROUND_SECONDS = 30;
 
 function toGameSession(gameSession: DbGameSession): GameSession {
@@ -84,6 +85,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
+  const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
+  const [isPortraitImage, setIsPortraitImage] = useState(false);
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -267,6 +270,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, [gameSession?.roundSeconds, gameSession?.roundStartedAt]);
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
+  const gridColumns = isPortraitImage ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
+  const gridRows = TOTAL_BLOCKS / gridColumns;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
   const selectedBlockSet = useMemo(() => new Set(selectedBlocks), [selectedBlocks]);
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
@@ -544,12 +549,32 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       </div>
 
       <div className="bg-white">
-        <div className="relative mx-auto aspect-video max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black">
+        <div
+          className="relative mx-auto max-h-[78vh] w-full max-w-[1280px] overflow-hidden rounded-md bg-black"
+          style={{ aspectRatio: imageAspectRatio }}
+        >
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
+          <img
+            alt=""
+            className="h-full w-full object-cover"
+            src={currentQuestion.imageUrl}
+            onLoad={(event) => {
+              const image = event.currentTarget;
+              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+                setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+                setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+              }
+            }}
+          />
 
           {!isPresenter ? (
-            <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))` }}>
+            <div
+              className="absolute inset-0 grid"
+              style={{
+                gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+              }}
+            >
               {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
                 <div className={revealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
               ))}
@@ -557,7 +582,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           ) : null}
 
           {isPresenter ? (
-            <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))` }}>
+            <div
+              className="absolute inset-0 grid"
+              style={{
+                gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+              }}
+            >
               {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
                 const isRevealed = revealedBlockSet.has(blockIndex);
                 const isSelected = selectedBlockSet.has(blockIndex);
@@ -679,6 +710,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </>
       ) : (
         <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+          <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm">
+            <span className="text-[var(--muted)]">倒计时</span>
+            <span className="font-semibold text-slate-950">{hasRoundStarted ? `${remainingSeconds} 秒` : "等待开始"}</span>
+          </div>
           {isCurrentPlayerCorrect ? (
             <p className="text-sm font-semibold text-emerald-700">你已答对本题，后续轮次无需继续作答。</p>
           ) : !hasRoundStarted ? (

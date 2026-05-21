@@ -58,6 +58,12 @@ function toQuestion(question: DbQuestion): Question {
 }
 
 function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = []): QuestionSet {
+  const questionUrlsText = questions
+    .slice()
+    .sort((a, b) => a.order_index - b.order_index)
+    .map((question) => question.image_url)
+    .join("\n");
+
   return {
     id: questionSet.id,
     title: questionSet.title,
@@ -65,10 +71,12 @@ function toQuestionSet(questionSet: DbQuestionSet, questions: DbQuestion[] = [])
     createdByPlayerId: questionSet.created_by_player_id,
     source: questionSet.source,
     isPublic: questionSet.is_public,
+    imageUrlsText: questionSet.image_urls_text ?? questionUrlsText,
     imageCount: questionSet.image_count,
     ratingAvg: questionSet.rating_avg,
     ratingCount: questionSet.rating_count,
     createdAt: questionSet.created_at,
+    updatedAt: questionSet.updated_at,
     questions: questions.map(toQuestion),
   };
 }
@@ -138,7 +146,32 @@ function isUniqueViolation(error: { code?: string } | null) {
   return error?.code === "23505";
 }
 
-const ALL_REVEALED_BLOCKS = Array.from({ length: 28 }, (_, index) => index);
+const REVEAL_BLOCK_COUNT = 45;
+const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
+
+export function parseImageUrlsText(imageUrlsText: string) {
+  return Array.from(
+    new Set(
+      imageUrlsText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => {
+          if (!line) return false;
+
+          try {
+            const url = new URL(line);
+            return url.protocol === "http:" || url.protocol === "https:";
+          } catch {
+            return false;
+          }
+        }),
+    ),
+  );
+}
+
+function imageUrlsToText(imageUrls: string[]) {
+  return imageUrls.map((url) => url.trim()).filter(Boolean).join("\n");
+}
 
 export async function createSupabaseRoom(playerId: string, nickname: string) {
   assertSupabaseEnv();
@@ -417,12 +450,13 @@ export async function createUploadedQuestionSet(params: {
   roomId: string;
   presenterPlayerId: string;
   title: string;
+  description?: string;
   imageUrls: string[];
 }) {
   assertSupabaseEnv();
 
   const title = params.title.trim();
-  const imageUrls = params.imageUrls.filter(Boolean);
+  const imageUrls = params.imageUrls.map((url) => url.trim()).filter(Boolean);
 
   if (!title) {
     throw new Error("请先输入题库标题。");
@@ -452,10 +486,12 @@ export async function createUploadedQuestionSet(params: {
     .from("question_sets")
     .insert({
       title,
+      description: params.description?.trim() || null,
       created_by_player_id: params.presenterPlayerId,
       source: "uploaded",
       is_public: false,
       image_count: imageUrls.length,
+      image_urls_text: imageUrlsToText(imageUrls),
     })
     .select()
     .single<DbQuestionSet>();
@@ -482,6 +518,76 @@ export async function createUploadedQuestionSet(params: {
   }
 
   return toQuestionSet(questionSet, questions ?? []);
+}
+
+export async function createQuestionSetFromUrlText(params: {
+  roomId: string;
+  presenterPlayerId: string;
+  title: string;
+  description?: string;
+  imageUrlsText: string;
+}) {
+  const imageUrls = parseImageUrlsText(params.imageUrlsText);
+
+  if (imageUrls.length === 0) {
+    throw new Error("至少需要 1 个有效的 http/https 图片 URL。");
+  }
+
+  return createUploadedQuestionSet({
+    roomId: params.roomId,
+    presenterPlayerId: params.presenterPlayerId,
+    title: params.title,
+    description: params.description,
+    imageUrls,
+  });
+}
+
+export async function getQuestionSetById(questionSetId: string) {
+  assertSupabaseEnv();
+
+  const { data: questionSet, error } = await supabase
+    .from("question_sets")
+    .select("*")
+    .eq("id", questionSetId)
+    .maybeSingle<DbQuestionSet>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!questionSet) {
+    return null;
+  }
+
+  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  return toQuestionSet(questionSet, questions);
+}
+
+export async function getCommunityQuestionSets(sort: "latest" | "rating" = "latest") {
+  assertSupabaseEnv();
+
+  let query = supabase.from("question_sets").select("*").eq("is_public", true);
+
+  if (sort === "rating") {
+    query = query.order("rating_avg", { ascending: false }).order("rating_count", { ascending: false });
+  } else {
+    query = query.order("created_at", { ascending: false });
+  }
+
+  const { data, error } = await query.limit(30).returns<DbQuestionSet[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const questionSets = await Promise.all(
+    (data ?? []).map(async (questionSet) => {
+      const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+      return toQuestionSet(questionSet, questions);
+    }),
+  );
+
+  return questionSets;
 }
 
 export async function startGameWithQuestionSet(params: {
@@ -514,7 +620,6 @@ export async function startGameWithQuestionSet(params: {
     .from("question_sets")
     .select("*")
     .eq("id", params.questionSetId)
-    .eq("created_by_player_id", params.presenterPlayerId)
     .maybeSingle<DbQuestionSet>();
 
   if (questionSetError) {
@@ -523,6 +628,10 @@ export async function startGameWithQuestionSet(params: {
 
   if (!questionSet || questionSet.image_count <= 0) {
     throw new Error("题库不存在或没有图片。");
+  }
+
+  if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
+    throw new Error("只能使用自己创建的题库或公开社区题库。");
   }
 
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
@@ -592,7 +701,7 @@ export async function getGameSessionById(gameSessionId: string) {
   return data ? toGameSession(data) : null;
 }
 
-export async function getQuestionsByQuestionSetId(questionSetId: string) {
+async function getDbQuestionsByQuestionSetId(questionSetId: string) {
   assertSupabaseEnv();
 
   const { data, error } = await supabase
@@ -606,7 +715,12 @@ export async function getQuestionsByQuestionSetId(questionSetId: string) {
     throw new Error(error.message);
   }
 
-  return (data ?? []).map(toQuestion);
+  return data ?? [];
+}
+
+export async function getQuestionsByQuestionSetId(questionSetId: string) {
+  const questions = await getDbQuestionsByQuestionSetId(questionSetId);
+  return questions.map(toQuestion);
 }
 
 export async function confirmRevealBlocks(params: {
@@ -633,7 +747,9 @@ export async function confirmRevealBlocks(params: {
   }
 
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
-  const selectedBlocks = params.selectedBlocks.filter((block) => Number.isInteger(block) && block >= 0 && block < 28);
+  const selectedBlocks = params.selectedBlocks.filter(
+    (block) => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT,
+  );
   const nextBlocks = Array.from(new Set([...revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
 
   if (nextBlocks.length === revealedBlocks.length) {
@@ -787,6 +903,115 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
       ...entry,
       rank: index + 1,
     }));
+}
+
+export async function publishQuestionSetToCommunity(params: {
+  questionSetId: string;
+  playerId: string;
+  title: string;
+  description?: string;
+}) {
+  assertSupabaseEnv();
+
+  const title = params.title.trim();
+
+  if (!title) {
+    throw new Error("请填写题库标题。");
+  }
+
+  const { data: questionSet, error } = await supabase
+    .from("question_sets")
+    .update({
+      title,
+      description: params.description?.trim() || null,
+      is_public: true,
+    })
+    .eq("id", params.questionSetId)
+    .eq("created_by_player_id", params.playerId)
+    .select()
+    .maybeSingle<DbQuestionSet>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!questionSet) {
+    throw new Error("只有题库创建者可以发布到社区。");
+  }
+
+  const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
+  return toQuestionSet(questionSet, questions);
+}
+
+export async function rateCommunityQuestionSet(params: {
+  questionSetId: string;
+  playerId: string;
+  rating: number;
+}) {
+  assertSupabaseEnv();
+
+  const rating = Math.max(1, Math.min(5, Math.floor(params.rating)));
+
+  const { data: questionSet, error: questionSetError } = await supabase
+    .from("question_sets")
+    .select("*")
+    .eq("id", params.questionSetId)
+    .eq("is_public", true)
+    .maybeSingle<DbQuestionSet>();
+
+  if (questionSetError) {
+    throw new Error(questionSetError.message);
+  }
+
+  if (!questionSet) {
+    throw new Error("只能给公开社区题库评分。");
+  }
+
+  const { error: ratingError } = await supabase.from("question_set_ratings").upsert(
+    {
+      question_set_id: params.questionSetId,
+      player_id: params.playerId,
+      rating,
+    },
+    { onConflict: "question_set_id,player_id" },
+  );
+
+  if (ratingError) {
+    throw new Error(ratingError.message);
+  }
+
+  const { data: ratings, error: ratingsLoadError } = await supabase
+    .from("question_set_ratings")
+    .select("rating")
+    .eq("question_set_id", params.questionSetId)
+    .returns<{ rating: number }[]>();
+
+  if (ratingsLoadError) {
+    throw new Error(ratingsLoadError.message);
+  }
+
+  const ratingCount = ratings?.length ?? 0;
+  const ratingAvg =
+    ratingCount > 0
+      ? Math.round((ratings ?? []).reduce((total, item) => total + item.rating, 0) * 100 / ratingCount) / 100
+      : 0;
+
+  const { data: updatedQuestionSet, error: updateError } = await supabase
+    .from("question_sets")
+    .update({
+      rating_avg: ratingAvg,
+      rating_count: ratingCount,
+    })
+    .eq("id", params.questionSetId)
+    .select()
+    .single<DbQuestionSet>();
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  const questions = await getDbQuestionsByQuestionSetId(updatedQuestionSet.id);
+  return toQuestionSet(updatedQuestionSet, questions);
 }
 
 export async function getQuestionResultsForQuestion(params: {

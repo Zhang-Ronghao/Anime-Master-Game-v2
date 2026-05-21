@@ -12,15 +12,19 @@ import { supabase } from "@/lib/supabaseClient";
 import {
   cancelCurrentRound,
   dissolveSupabaseRoom,
+  getGameSessionById,
   getLeaderboardForGameSession,
   getPlayersByRoomId,
+  getQuestionSetById,
   getRoomByCode,
   joinSupabaseRoom,
   leaveSupabaseRoom,
+  publishQuestionSetToCommunity,
+  rateCommunityQuestionSet,
   returnRoomToLobby,
   selectPresenterForRound,
 } from "@/lib/supabaseRooms";
-import type { DbRoom, LeaderboardEntry, Player, Room, RoomStatus } from "@/types/game";
+import type { DbRoom, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -91,19 +95,27 @@ function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[
 
 function GameResultPanel({
   currentGameId,
+  playerId,
   isHost,
   isReturningToLobby,
   onReturnToLobby,
   onError,
 }: {
   currentGameId?: string | null;
+  playerId: string;
   isHost: boolean;
   isReturningToLobby: boolean;
   onReturnToLobby: () => void;
   onError: (message: string) => void;
 }) {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
+  const [publishTitle, setPublishTitle] = useState("");
+  const [publishDescription, setPublishDescription] = useState("");
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [ratingValue, setRatingValue] = useState(5);
+  const [isRating, setIsRating] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -116,10 +128,17 @@ function GameResultPanel({
 
       setIsLoadingLeaderboard(true);
       try {
-        const nextLeaderboard = await getLeaderboardForGameSession(currentGameId);
+        const [nextLeaderboard, loadedGameSession] = await Promise.all([
+          getLeaderboardForGameSession(currentGameId),
+          getGameSessionById(currentGameId),
+        ]);
+        const loadedQuestionSet = loadedGameSession ? await getQuestionSetById(loadedGameSession.questionSetId) : null;
 
         if (isMounted) {
           setLeaderboard(nextLeaderboard);
+          setQuestionSet(loadedQuestionSet);
+          setPublishTitle(loadedQuestionSet?.title ?? "");
+          setPublishDescription(loadedQuestionSet?.description ?? "");
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -139,45 +158,142 @@ function GameResultPanel({
     };
   }, [currentGameId, onError]);
 
-  return (
-    <Panel title="最终排行榜">
-      {isLoadingLeaderboard ? (
-        <p className="text-sm text-[var(--muted)]">正在读取本轮分数...</p>
-      ) : leaderboard.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">本轮没有玩家得分。</p>
-      ) : (
-        <div className="overflow-hidden rounded-md border border-[var(--line)]">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs uppercase text-[var(--muted)]">
-              <tr>
-                <th className="px-4 py-3">排名</th>
-                <th className="px-4 py-3">玩家昵称</th>
-                <th className="px-4 py-3">总分</th>
-                <th className="px-4 py-3">答对题数</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--line)] bg-white">
-              {leaderboard.map((entry) => (
-                <tr key={entry.playerId}>
-                  <td className="px-4 py-3 font-semibold text-slate-950">{entry.rank}</td>
-                  <td className="px-4 py-3">{entry.nickname}</td>
-                  <td className="px-4 py-3 font-semibold">{entry.score}</td>
-                  <td className="px-4 py-3">{entry.correctCount}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+  async function handlePublishQuestionSet() {
+    if (!questionSet) {
+      return;
+    }
 
-      {isHost ? (
-        <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
-          {isReturningToLobby ? "返回中..." : "回到房间大厅"}
-        </Button>
-      ) : (
-        <p className="mt-4 text-sm text-[var(--muted)]">等待房主回到房间大厅。</p>
-      )}
-    </Panel>
+    setIsPublishing(true);
+    try {
+      const published = await publishQuestionSetToCommunity({
+        questionSetId: questionSet.id,
+        playerId,
+        title: publishTitle,
+        description: publishDescription,
+      });
+      setQuestionSet(published);
+    } catch (caughtError) {
+      onError(caughtError instanceof Error ? caughtError.message : "发布到社区失败。");
+    } finally {
+      setIsPublishing(false);
+    }
+  }
+
+  async function handleRateQuestionSet() {
+    if (!questionSet) {
+      return;
+    }
+
+    setIsRating(true);
+    try {
+      const rated = await rateCommunityQuestionSet({
+        questionSetId: questionSet.id,
+        playerId,
+        rating: ratingValue,
+      });
+      setQuestionSet(rated);
+    } catch (caughtError) {
+      onError(caughtError instanceof Error ? caughtError.message : "评分失败。");
+    } finally {
+      setIsRating(false);
+    }
+  }
+
+  const canPublish = Boolean(questionSet && !questionSet.isPublic && questionSet.createdByPlayerId === playerId);
+  const canRate = Boolean(questionSet?.isPublic);
+
+  return (
+    <div className="space-y-5">
+      <Panel title="最终排行榜">
+        {isLoadingLeaderboard ? (
+          <p className="text-sm text-[var(--muted)]">正在读取本轮分数...</p>
+        ) : leaderboard.length === 0 ? (
+          <p className="text-sm text-[var(--muted)]">本轮没有玩家得分。</p>
+        ) : (
+          <div className="overflow-hidden rounded-md border border-[var(--line)]">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-[var(--muted)]">
+                <tr>
+                  <th className="px-4 py-3">排名</th>
+                  <th className="px-4 py-3">玩家昵称</th>
+                  <th className="px-4 py-3">总分</th>
+                  <th className="px-4 py-3">答对题数</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--line)] bg-white">
+                {leaderboard.map((entry) => (
+                  <tr key={entry.playerId}>
+                    <td className="px-4 py-3 font-semibold text-slate-950">{entry.rank}</td>
+                    <td className="px-4 py-3">{entry.nickname}</td>
+                    <td className="px-4 py-3 font-semibold">{entry.score}</td>
+                    <td className="px-4 py-3">{entry.correctCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {isHost ? (
+          <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
+            {isReturningToLobby ? "返回中..." : "回到房间大厅"}
+          </Button>
+        ) : (
+          <p className="mt-4 text-sm text-[var(--muted)]">等待房主回到房间大厅。</p>
+        )}
+      </Panel>
+
+      {canPublish ? (
+        <Panel title="发布到社区">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-900">标题</span>
+              <input
+                className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                value={publishTitle}
+                onChange={(event) => setPublishTitle(event.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-900">简介</span>
+              <input
+                className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                value={publishDescription}
+                onChange={(event) => setPublishDescription(event.target.value)}
+              />
+            </label>
+          </div>
+          <Button className="mt-4" type="button" onClick={handlePublishQuestionSet} disabled={isPublishing}>
+            {isPublishing ? "发布中..." : "发布到社区"}
+          </Button>
+        </Panel>
+      ) : null}
+
+      {canRate ? (
+        <Panel title="社区评分">
+          <p className="text-sm text-[var(--muted)]">
+            所有玩家都可以评分；同一玩家重复评分会更新自己的上一次评分。当前评分：
+            {Number(questionSet?.ratingAvg ?? 0).toFixed(2)} / 5，{questionSet?.ratingCount ?? 0} 人评分。
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <select
+              className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+              value={ratingValue}
+              onChange={(event) => setRatingValue(Number(event.target.value))}
+            >
+              {[1, 2, 3, 4, 5].map((rating) => (
+                <option key={rating} value={rating}>
+                  {rating} 星
+                </option>
+              ))}
+            </select>
+            <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
+              {isRating ? "评分中..." : "提交评分"}
+            </Button>
+          </div>
+        </Panel>
+      ) : null}
+    </div>
   );
 }
 
@@ -585,6 +701,7 @@ export default function RoomPage() {
             {room.status === "GAME_RESULT" ? (
               <GameResultPanel
                 currentGameId={room.currentGameId}
+                playerId={playerId}
                 isHost={isHost}
                 isReturningToLobby={isReturningToLobby}
                 onReturnToLobby={handleReturnToLobby}

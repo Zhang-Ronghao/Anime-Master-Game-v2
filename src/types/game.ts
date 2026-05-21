@@ -50,10 +50,12 @@ export type QuestionSet = {
   createdByPlayerId: string;
   source: QuestionSetSource;
   isPublic: boolean;
+  imageUrlsText?: string | null;
   imageCount: number;
   ratingAvg: number;
   ratingCount: number;
   createdAt: string;
+  updatedAt?: string | null;
   questions?: Question[];
 };
 
@@ -126,10 +128,12 @@ export type DbQuestionSet = {
   created_by_player_id: string;
   source: QuestionSetSource;
   is_public: boolean;
+  image_urls_text?: string | null;
   image_count: number;
   rating_avg: number;
   rating_count: number;
   created_at: string;
+  updated_at?: string | null;
 };
 
 export type DbQuestion = {
