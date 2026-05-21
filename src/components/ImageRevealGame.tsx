@@ -723,7 +723,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)_280px] xl:grid-cols-[260px_minmax(0,1fr)_320px]">
+      <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1280px)_320px] xl:grid-cols-[300px_minmax(0,1280px)_340px] lg:justify-center">
         {scorePanel}
         <div className="min-w-0">{imagePanel}</div>
         {actionPanel}

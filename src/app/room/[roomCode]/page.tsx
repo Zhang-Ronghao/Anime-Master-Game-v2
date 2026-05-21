@@ -770,7 +770,7 @@ export default function RoomPage() {
           </Button>
         </Panel>
       ) : room.status === "PLAYING" ? (
-        <main className="space-y-4">
+        <main className="relative left-1/2 w-[calc(100vw-2rem)] -translate-x-1/2 space-y-4 sm:w-[calc(100vw-4rem)]">
           <ImageRevealGame
             room={room}
             playerId={playerId}
