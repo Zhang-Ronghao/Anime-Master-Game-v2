@@ -399,7 +399,15 @@ export default function RoomPage() {
         </Panel>
       ) : room.status === "PLAYING" ? (
         <main className="space-y-4">
-          <ImageRevealGame room={room} playerId={playerId} isPresenter={isCurrentPresenter} onError={setError} />
+          <ImageRevealGame
+            room={room}
+            playerId={playerId}
+            isPresenter={isCurrentPresenter}
+            onError={setError}
+            onRoomUpdated={(nextRoom) =>
+              setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : nextRoom))
+            }
+          />
           {isHost ? (
             <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
               {isCancelingRound ? "取消中..." : "取消本轮"}

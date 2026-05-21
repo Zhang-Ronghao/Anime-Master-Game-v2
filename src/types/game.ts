@@ -74,9 +74,41 @@ export type GameSession = {
   currentQuestionIndex: number;
   currentRevealRound: number;
   revealedBlocks: number[];
+  maxRevealRounds: number;
+  roundSeconds: number;
+  roundScores: number[];
   roundStartedAt?: string | null;
   createdAt: string;
   endedAt?: string | null;
+};
+
+export type Answer = {
+  id: string;
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+  answerText: string;
+  submittedAt: string;
+};
+
+export type PlayerScore = {
+  id: string;
+  gameSessionId: string;
+  playerId: string;
+  score: number;
+  correctCount: number;
+};
+
+export type QuestionResult = {
+  id: string;
+  gameSessionId: string;
+  questionIndex: number;
+  playerId: string;
+  scoredRound: number;
+  scoreAwarded: number;
+  judgedByPlayerId: string;
+  judgedAt: string;
 };
 
 export type DbQuestionSet = {
@@ -109,9 +141,41 @@ export type DbGameSession = {
   current_question_index: number;
   current_reveal_round: number;
   revealed_blocks: unknown;
+  max_reveal_rounds?: number;
+  round_seconds?: number;
+  round_scores?: unknown;
   round_started_at: string | null;
   created_at: string;
   ended_at: string | null;
+};
+
+export type DbAnswer = {
+  id: string;
+  game_session_id: string;
+  question_index: number;
+  reveal_round: number;
+  player_id: string;
+  answer_text: string;
+  submitted_at: string;
+};
+
+export type DbPlayerScore = {
+  id: string;
+  game_session_id: string;
+  player_id: string;
+  score: number;
+  correct_count: number;
+};
+
+export type DbQuestionResult = {
+  id: string;
+  game_session_id: string;
+  question_index: number;
+  player_id: string;
+  scored_round: number;
+  score_awarded: number;
+  judged_by_player_id: string;
+  judged_at: string;
 };
 
 export type LocalSession = {

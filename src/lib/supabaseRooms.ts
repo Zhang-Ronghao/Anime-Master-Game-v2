@@ -3,14 +3,20 @@
 import { createRoomCode } from "@/lib/id";
 import { assertSupabaseEnv, getSupabasePublicConfig, supabase } from "@/lib/supabaseClient";
 import type {
+  Answer,
+  DbAnswer,
   DbGameSession,
   DbPlayer,
+  DbPlayerScore,
   DbQuestion,
+  DbQuestionResult,
   DbQuestionSet,
   DbRoom,
   GameSession,
   Player,
+  PlayerScore,
   Question,
+  QuestionResult,
   QuestionSet,
   Room,
 } from "@/types/game";
@@ -70,6 +76,9 @@ function toGameSession(gameSession: DbGameSession): GameSession {
   const revealedBlocks = Array.isArray(gameSession.revealed_blocks)
     ? gameSession.revealed_blocks.filter((block): block is number => Number.isInteger(block))
     : [];
+  const roundScores = Array.isArray(gameSession.round_scores)
+    ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
+    : [3, 2, 1];
 
   return {
     id: gameSession.id,
@@ -80,9 +89,47 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     currentQuestionIndex: gameSession.current_question_index,
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks,
+    maxRevealRounds: gameSession.max_reveal_rounds ?? 3,
+    roundSeconds: gameSession.round_seconds ?? 30,
+    roundScores,
     roundStartedAt: gameSession.round_started_at,
     createdAt: gameSession.created_at,
     endedAt: gameSession.ended_at,
+  };
+}
+
+function toAnswer(answer: DbAnswer): Answer {
+  return {
+    id: answer.id,
+    gameSessionId: answer.game_session_id,
+    questionIndex: answer.question_index,
+    revealRound: answer.reveal_round,
+    playerId: answer.player_id,
+    answerText: answer.answer_text,
+    submittedAt: answer.submitted_at,
+  };
+}
+
+function toPlayerScore(playerScore: DbPlayerScore): PlayerScore {
+  return {
+    id: playerScore.id,
+    gameSessionId: playerScore.game_session_id,
+    playerId: playerScore.player_id,
+    score: playerScore.score,
+    correctCount: playerScore.correct_count,
+  };
+}
+
+function toQuestionResult(questionResult: DbQuestionResult): QuestionResult {
+  return {
+    id: questionResult.id,
+    gameSessionId: questionResult.game_session_id,
+    questionIndex: questionResult.question_index,
+    playerId: questionResult.player_id,
+    scoredRound: questionResult.scored_round,
+    scoreAwarded: questionResult.score_awarded,
+    judgedByPlayerId: questionResult.judged_by_player_id,
+    judgedAt: questionResult.judged_at,
   };
 }
 
@@ -438,6 +485,9 @@ export async function startGameWithQuestionSet(params: {
   roomId: string;
   presenterPlayerId: string;
   questionSetId: string;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
 }) {
   assertSupabaseEnv();
 
@@ -472,6 +522,13 @@ export async function startGameWithQuestionSet(params: {
     throw new Error("题库不存在或没有图片。");
   }
 
+  const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
+  const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 30)));
+  const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
+    const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
+    return Math.max(0, Math.floor(score));
+  });
+
   const { data: gameSession, error: gameSessionError } = await supabase
     .from("game_sessions")
     .insert({
@@ -479,6 +536,9 @@ export async function startGameWithQuestionSet(params: {
       question_set_id: params.questionSetId,
       presenter_player_id: params.presenterPlayerId,
       status: "PLAYING",
+      max_reveal_rounds: maxRevealRounds,
+      round_seconds: roundSeconds,
+      round_scores: roundScores,
     })
     .select()
     .single<DbGameSession>();
@@ -578,18 +638,19 @@ export async function confirmRevealBlocks(params: {
   }
 
   const roundStartedAt = currentGameSession.round_started_at;
-  const roundDurationMs = 30_000;
+  const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
+  const roundDurationMs = Math.max(1, currentGameSession.round_seconds ?? 30) * 1000;
   const roundEnded = !roundStartedAt || Date.now() - new Date(roundStartedAt).getTime() >= roundDurationMs;
   const nextRevealRound =
     roundStartedAt && roundEnded
-      ? Math.min(3, currentGameSession.current_reveal_round + 1)
+      ? Math.min(maxRevealRounds, currentGameSession.current_reveal_round + 1)
       : currentGameSession.current_reveal_round;
 
   if (roundStartedAt && !roundEnded) {
     throw new Error("当前轮倒计时结束后才能确认下一轮揭露。");
   }
 
-  if (currentGameSession.current_reveal_round >= 3 && roundStartedAt && roundEnded) {
+  if (currentGameSession.current_reveal_round >= maxRevealRounds && roundStartedAt && roundEnded) {
     throw new Error("本题最多 3 轮揭露。");
   }
 
@@ -615,4 +676,437 @@ export async function confirmRevealBlocks(params: {
   }
 
   return toGameSession(updatedGameSession);
+}
+
+export async function getAnswersForQuestionRound(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .eq("reveal_round", params.revealRound)
+    .order("submitted_at", { ascending: true })
+    .returns<DbAnswer[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toAnswer);
+}
+
+export async function getAnswerForPlayerRound(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .eq("reveal_round", params.revealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data ? toAnswer(data) : null;
+}
+
+export async function getPlayerScores(gameSessionId: string) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("player_scores")
+    .select("*")
+    .eq("game_session_id", gameSessionId)
+    .order("score", { ascending: false })
+    .returns<DbPlayerScore[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toPlayerScore);
+}
+
+export async function getQuestionResultsForQuestion(params: {
+  gameSessionId: string;
+  questionIndex: number;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("question_results")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .returns<DbQuestionResult[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toQuestionResult);
+}
+
+export async function submitAnswer(params: {
+  gameSessionId: string;
+  playerId: string;
+  answerText: string;
+}) {
+  assertSupabaseEnv();
+
+  const answerText = params.answerText.trim();
+
+  if (!answerText) {
+    throw new Error("请输入答案。");
+  }
+
+  const gameSession = await getGameSessionById(params.gameSessionId);
+
+  if (!gameSession || gameSession.status !== "PLAYING") {
+    throw new Error("当前游戏不在答题阶段。");
+  }
+
+  if (gameSession.presenterPlayerId === params.playerId) {
+    throw new Error("出题人不能提交答案。");
+  }
+
+  if (!gameSession.roundStartedAt) {
+    throw new Error("等待出题人确认揭露后才能答题。");
+  }
+
+  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+    throw new Error("本轮倒计时已结束。");
+  }
+
+  const { data: existingResult, error: resultError } = await supabase
+    .from("question_results")
+    .select("id")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("player_id", params.playerId)
+    .maybeSingle<{ id: string }>();
+
+  if (resultError) {
+    throw new Error(resultError.message);
+  }
+
+  if (existingResult) {
+    throw new Error("你已答对本题，不能继续作答。");
+  }
+
+  const { data, error } = await supabase
+    .from("answers")
+    .upsert(
+      {
+        game_session_id: gameSession.id,
+        question_index: gameSession.currentQuestionIndex,
+        reveal_round: gameSession.currentRevealRound,
+        player_id: params.playerId,
+        answer_text: answerText,
+        submitted_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "game_session_id,question_index,reveal_round,player_id",
+      },
+    )
+    .select()
+    .single<DbAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toAnswer(data);
+}
+
+export async function gradeAnswersAndAdvance(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  correctPlayerIds: string[];
+}) {
+  assertSupabaseEnv();
+
+  const { data: currentGameSession, error: currentError } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("只有当前出题人可以判分。");
+  }
+
+  if (!currentGameSession.round_started_at) {
+    throw new Error("本轮还没有开始。");
+  }
+
+  const currentRound = currentGameSession.current_reveal_round;
+  const questionIndex = currentGameSession.current_question_index;
+  const currentSession = toGameSession(currentGameSession);
+  const roundScore = currentSession.roundScores[currentRound - 1] ?? Math.max(1, currentSession.maxRevealRounds - currentRound + 1);
+  const uniqueCorrectPlayerIds = Array.from(new Set(params.correctPlayerIds)).filter(
+    (playerId) => playerId && playerId !== params.presenterPlayerId,
+  );
+  const newlyScoredPlayerIds: string[] = [];
+
+  for (const correctPlayerId of uniqueCorrectPlayerIds) {
+    const { error } = await supabase.from("question_results").insert({
+      game_session_id: currentGameSession.id,
+      question_index: questionIndex,
+      player_id: correctPlayerId,
+      scored_round: currentRound,
+      score_awarded: roundScore,
+      judged_by_player_id: params.presenterPlayerId,
+    });
+
+    if (error) {
+      if (isUniqueViolation(error)) {
+        continue;
+      }
+
+      throw new Error(error.message);
+    }
+
+    newlyScoredPlayerIds.push(correctPlayerId);
+  }
+
+  for (const scoredPlayerId of newlyScoredPlayerIds) {
+    const { data: existingScore, error: scoreLoadError } = await supabase
+      .from("player_scores")
+      .select("*")
+      .eq("game_session_id", currentGameSession.id)
+      .eq("player_id", scoredPlayerId)
+      .maybeSingle<DbPlayerScore>();
+
+    if (scoreLoadError) {
+      throw new Error(scoreLoadError.message);
+    }
+
+    const { error: scoreError } = await supabase.from("player_scores").upsert(
+      {
+        id: existingScore?.id,
+        game_session_id: currentGameSession.id,
+        player_id: scoredPlayerId,
+        score: (existingScore?.score ?? 0) + roundScore,
+        correct_count: (existingScore?.correct_count ?? 0) + 1,
+      },
+      {
+        onConflict: "game_session_id,player_id",
+      },
+    );
+
+    if (scoreError) {
+      throw new Error(scoreError.message);
+    }
+  }
+
+  const { data: players, error: playersError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("room_id", currentGameSession.room_id)
+    .returns<DbPlayer[]>();
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  const guesserIds = (players ?? [])
+    .filter((player) => player.id !== currentGameSession.presenter_player_id)
+    .map((player) => player.id);
+
+  const { data: questionResults, error: questionResultsError } = await supabase
+    .from("question_results")
+    .select("*")
+    .eq("game_session_id", currentGameSession.id)
+    .eq("question_index", questionIndex)
+    .returns<DbQuestionResult[]>();
+
+  if (questionResultsError) {
+    throw new Error(questionResultsError.message);
+  }
+
+  const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
+  const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+  const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
+  const shouldAdvanceQuestion = allPlayersCorrect || currentRound >= currentSession.maxRevealRounds;
+  let nextGameSession: GameSession;
+  let nextRoom: Room | null = null;
+
+  if (shouldAdvanceQuestion) {
+    const nextQuestionIndex = questionIndex + 1;
+
+    if (nextQuestionIndex >= questions.length) {
+      const { data: endedGameSession, error: endGameError } = await supabase
+        .from("game_sessions")
+        .update({
+          status: "GAME_RESULT",
+          ended_at: new Date().toISOString(),
+        })
+        .eq("id", currentGameSession.id)
+        .select()
+        .single<DbGameSession>();
+
+      if (endGameError) {
+        throw new Error(endGameError.message);
+      }
+
+      const { data: updatedRoom, error: roomError } = await supabase
+        .from("rooms")
+        .update({
+          game_status: "GAME_RESULT",
+        })
+        .eq("id", currentGameSession.room_id)
+        .select()
+        .single<DbRoom>();
+
+      if (roomError) {
+        throw new Error(roomError.message);
+      }
+
+      nextGameSession = toGameSession(endedGameSession);
+      nextRoom = toRoom(updatedRoom);
+    } else {
+      const { data: updatedGameSession, error: nextQuestionError } = await supabase
+        .from("game_sessions")
+        .update({
+          current_question_index: nextQuestionIndex,
+          current_reveal_round: 1,
+          revealed_blocks: [],
+          round_started_at: null,
+        })
+        .eq("id", currentGameSession.id)
+        .select()
+        .single<DbGameSession>();
+
+      if (nextQuestionError) {
+        throw new Error(nextQuestionError.message);
+      }
+
+      nextGameSession = toGameSession(updatedGameSession);
+    }
+  } else {
+    const { data: updatedGameSession, error: nextRoundError } = await supabase
+      .from("game_sessions")
+      .update({
+        current_reveal_round: currentRound + 1,
+        round_started_at: null,
+      })
+      .eq("id", currentGameSession.id)
+      .select()
+      .single<DbGameSession>();
+
+    if (nextRoundError) {
+      throw new Error(nextRoundError.message);
+    }
+
+    nextGameSession = toGameSession(updatedGameSession);
+  }
+
+  return {
+    gameSession: nextGameSession,
+    room: nextRoom,
+    newlyScoredPlayerIds,
+  };
+}
+
+export async function skipCurrentQuestion(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+}) {
+  assertSupabaseEnv();
+
+  const { data: currentGameSession, error: currentError } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("只有当前出题人可以跳过本题。");
+  }
+
+  const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
+  const nextQuestionIndex = currentGameSession.current_question_index + 1;
+
+  if (nextQuestionIndex >= questions.length) {
+    const { data: endedGameSession, error: endGameError } = await supabase
+      .from("game_sessions")
+      .update({
+        status: "GAME_RESULT",
+        ended_at: new Date().toISOString(),
+      })
+      .eq("id", currentGameSession.id)
+      .select()
+      .single<DbGameSession>();
+
+    if (endGameError) {
+      throw new Error(endGameError.message);
+    }
+
+    const { data: updatedRoom, error: roomError } = await supabase
+      .from("rooms")
+      .update({
+        game_status: "GAME_RESULT",
+      })
+      .eq("id", currentGameSession.room_id)
+      .select()
+      .single<DbRoom>();
+
+    if (roomError) {
+      throw new Error(roomError.message);
+    }
+
+    return {
+      gameSession: toGameSession(endedGameSession),
+      room: toRoom(updatedRoom),
+    };
+  }
+
+  const { data: updatedGameSession, error } = await supabase
+    .from("game_sessions")
+    .update({
+      current_question_index: nextQuestionIndex,
+      current_reveal_round: 1,
+      revealed_blocks: [],
+      round_started_at: null,
+    })
+    .eq("id", currentGameSession.id)
+    .select()
+    .single<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return {
+    gameSession: toGameSession(updatedGameSession),
+    room: null,
+  };
 }
