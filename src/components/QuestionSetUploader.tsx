@@ -17,18 +17,13 @@ import {
   getCommunityQuestionSets,
   parseImageUrlsText,
   parseQuestionImportText,
-  startGameWithQuestionSet,
+  prepareQuestionSetForStart,
 } from "@/lib/supabaseRooms";
 import type { QuestionSet, Room } from "@/types/game";
 
 type QuestionSetUploaderProps = {
   room: Room;
   presenterPlayerId: string;
-  gameSettings: {
-    maxRevealRounds: number;
-    roundSeconds: number;
-    roundScores: number[];
-  };
   onRoomUpdated: (room: Room) => void;
   onError: (message: string) => void;
   onClearError?: () => void;
@@ -91,7 +86,6 @@ function getQuestionSetPreviewItems(questionSet: QuestionSet | null) {
 export function QuestionSetUploader({
   room,
   presenterPlayerId,
-  gameSettings,
   onRoomUpdated,
   onError,
   onClearError,
@@ -114,7 +108,7 @@ export function QuestionSetUploader({
   const [communitySets, setCommunitySets] = useState<QuestionSet[]>([]);
   const [communitySearch, setCommunitySearch] = useState("");
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
-  const [isStartingGame, setIsStartingGame] = useState(false);
+  const [isNotifyingHost, setIsNotifyingHost] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
   const [results, setResults] = useState<CloudinaryUploadItemResult[]>([]);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
@@ -170,6 +164,27 @@ export function QuestionSetUploader({
   function resetCreatedSet() {
     setQuestionSet(null);
     setResults([]);
+  }
+
+  async function markQuestionSetReady(selectedQuestionSet: QuestionSet) {
+    if (!room.id) {
+      return;
+    }
+
+    setIsNotifyingHost(true);
+    try {
+      const nextRoom = await prepareQuestionSetForStart({
+        roomId: room.id,
+        presenterPlayerId,
+        questionSetId: selectedQuestionSet.id,
+      });
+      onRoomUpdated({ ...room, ...nextRoom, players: room.players });
+      clearError();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "通知房主失败，请稍后重试。");
+    } finally {
+      setIsNotifyingHost(false);
+    }
   }
 
   function switchMode(nextMode: SetupMode) {
@@ -275,6 +290,7 @@ export function QuestionSetUploader({
     setQuestionSet(createdQuestionSet);
     clearError();
     scrollToPreview();
+    await markQuestionSetReady(createdQuestionSet);
     return createdQuestionSet;
   }
 
@@ -327,6 +343,7 @@ export function QuestionSetUploader({
       setQuestionSet(createdQuestionSet);
       clearError();
       scrollToPreview();
+      await markQuestionSetReady(createdQuestionSet);
     } catch (error) {
       onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败。");
     } finally {
@@ -348,12 +365,13 @@ export function QuestionSetUploader({
     }
   }
 
-  function handleSelectCommunitySet(selectedQuestionSet: QuestionSet) {
+  async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet) {
     setQuestionSet(selectedQuestionSet);
     setTitle(selectedQuestionSet.title);
     setDescription(selectedQuestionSet.description ?? "");
     clearError();
     scrollToPreview();
+    await markQuestionSetReady(selectedQuestionSet);
   }
 
   async function handleCopyUrlsText() {
@@ -365,37 +383,12 @@ export function QuestionSetUploader({
     }
   }
 
-  async function handleStartGame() {
-    if (!room.id || !questionSet) {
-      return;
-    }
-
-    clearError();
-    setIsStartingGame(true);
-    try {
-      const started = await startGameWithQuestionSet({
-        roomId: room.id,
-        presenterPlayerId,
-        questionSetId: questionSet.id,
-        maxRevealRounds: gameSettings.maxRevealRounds,
-        roundSeconds: gameSettings.roundSeconds,
-        roundScores: gameSettings.roundScores,
-      });
-      clearError();
-      onRoomUpdated({ ...room, ...started.room, players: room.players });
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "开始游戏失败，请稍后重试。");
-    } finally {
-      setIsStartingGame(false);
-    }
-  }
-
   return (
     <div className="mt-5 space-y-4 rounded-md border border-[var(--line)] bg-white p-4">
       <div>
         <p className="font-semibold text-slate-900">你是本轮出题人，请准备题库。</p>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          选择一种题库来源，创建或选中题库后检查预览，再点击“开始游戏”。
+          选择一种题库来源，创建或选中题库后会通知房主，由房主开始游戏。
         </p>
       </div>
 
@@ -656,7 +649,7 @@ export function QuestionSetUploader({
                 <Button
                   type="button"
                   onClick={() => {
-                    handleSelectCommunitySet(previewingCommunitySet);
+                    void handleSelectCommunitySet(previewingCommunitySet);
                     setPreviewingCommunitySet(null);
                   }}
                 >
@@ -698,9 +691,9 @@ export function QuestionSetUploader({
                 图片数量：{questionSet.imageCount}，{questionSet.isPublic ? "社区公开题库" : "未发布题库"}
               </p>
             </div>
-            <Button type="button" onClick={handleStartGame} disabled={isStartingGame}>
-              {isStartingGame ? "启动中..." : "开始游戏"}
-            </Button>
+            <div className="text-sm font-semibold text-emerald-700">
+              {isNotifyingHost ? "正在通知房主..." : "题库已准备好，等待房主开始游戏。"}
+            </div>
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
             {previewItems.slice(0, 12).map((item) => (

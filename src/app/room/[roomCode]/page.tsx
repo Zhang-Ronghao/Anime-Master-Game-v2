@@ -24,6 +24,7 @@ import {
   rateCommunityQuestionSet,
   returnRoomToLobby,
   selectPresenterForRound,
+  startGameWithQuestionSet,
 } from "@/lib/supabaseRooms";
 import type { DbRoom, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
 
@@ -51,6 +52,7 @@ function applyRoomMeta(currentRoom: Room | null, dbRoom: DbRoom): Room | null {
     status: dbRoom.game_status,
     currentPresenterPlayerId: dbRoom.current_presenter_player_id,
     currentGameId: dbRoom.current_game_id,
+    preparedQuestionSetId: dbRoom.prepared_question_set_id ?? null,
     updatedAt: dbRoom.updated_at,
   };
 }
@@ -107,8 +109,10 @@ function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: b
     text = isHost ? "先在大厅设置本轮参数，然后选择一名出题人。" : "等待房主设置参数并选择出题人。";
   } else if (room.status === "QUESTION_SETUP") {
     text = isCurrentPresenter
-      ? "确认本轮游戏设置，选择上传、URL 文本或社区题库，创建题库预览后开始游戏。"
-      : "等待出题人准备题库并开始游戏。";
+      ? "选择上传、URL 文本或社区题库，创建题库预览后通知房主开始游戏。"
+      : room.preparedQuestionSetId
+        ? "出题人已准备好题库，等待房主开始游戏。"
+        : "等待出题人准备题库。";
   } else if (room.status === "GAME_RESULT") {
     text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一轮。" : "查看排行榜并评分，等待房主回到大厅。";
   }
@@ -146,7 +150,7 @@ function GameSettingsPanel({
   return (
     <Panel title="本轮游戏设置">
       <p className="text-sm leading-6 text-[var(--muted)]">
-        这里设置揭露轮数、每轮倒计时和每轮答对分数。设置会在出题人点击“开始游戏”时写入本轮游戏。
+        这里设置揭露轮数、每轮倒计时和每轮答对分数。设置会在房主点击“开始游戏”时写入本轮游戏。
       </p>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block">
@@ -472,6 +476,7 @@ export default function RoomPage() {
   const [pendingPresenterId, setPendingPresenterId] = useState("");
   const [isCancelingRound, setIsCancelingRound] = useState(false);
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
+  const [isStartingGame, setIsStartingGame] = useState(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     maxRevealRounds: 3,
     roundSeconds: 60,
@@ -660,6 +665,7 @@ export default function RoomPage() {
   const isHost = Boolean(currentPlayer?.isHost);
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
+  const shouldShowLobby = room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && !isCurrentPresenter);
 
   async function handleBackHome() {
     try {
@@ -758,6 +764,32 @@ export default function RoomPage() {
     }
   }
 
+  async function handleStartGame() {
+    if (!room?.id || !playerId || !isHost || room.status !== "QUESTION_SETUP" || !room.currentPresenterPlayerId || !room.preparedQuestionSetId) {
+      return;
+    }
+
+    setIsStartingGame(true);
+    setError("");
+
+    try {
+      const started = await startGameWithQuestionSet({
+        roomId: room.id,
+        hostPlayerId: playerId,
+        presenterPlayerId: room.currentPresenterPlayerId,
+        questionSetId: room.preparedQuestionSetId,
+        maxRevealRounds: gameSettings.maxRevealRounds,
+        roundSeconds: gameSettings.roundSeconds,
+        roundScores: gameSettings.roundScores,
+      });
+      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...started.room, players: currentRoom.players } : started.room));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "开始游戏失败，请稍后重试。");
+    } finally {
+      setIsStartingGame(false);
+    }
+  }
+
   return (
     <AppShell>
       {room?.status !== "PLAYING" ? (
@@ -832,13 +864,13 @@ export default function RoomPage() {
           </div>
         </main>
       ) : (
-        <div className={room.status === "QUESTION_SETUP" || room.status === "GAME_RESULT" ? "grid gap-5" : "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]"}>
-          {room.status === "LOBBY" ? (
+        <div className={shouldShowLobby ? "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]" : "grid gap-5"}>
+          {shouldShowLobby ? (
             <PlayerList players={room.players} playerId={playerId} presenterPlayerId={room.currentPresenterPlayerId} />
           ) : null}
 
           <div className="space-y-5">
-            {room.status === "LOBBY" ? (
+            {shouldShowLobby ? (
               <GameSettingsPanel
                 settings={gameSettings}
                 canEdit={isHost}
@@ -866,7 +898,6 @@ export default function RoomPage() {
                     <QuestionSetUploader
                       room={room}
                       presenterPlayerId={playerId}
-                      gameSettings={gameSettings}
                       onRoomUpdated={(nextRoom) =>
                         setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
                       }
@@ -874,18 +905,31 @@ export default function RoomPage() {
                       onClearError={() => setError("")}
                     />
                   ) : (
-                    <p className="font-semibold text-slate-900">等待出题人准备题库。</p>
+                    <p className="font-semibold text-slate-900">
+                      {room.preparedQuestionSetId ? "出题人已准备好题库，房主可以开始游戏。" : "等待出题人准备题库。"}
+                    </p>
                   )}
                   {isHost ? (
-                    <Button
-                      className="mt-4"
-                      type="button"
-                      variant="secondary"
-                      onClick={handleCancelRound}
-                      disabled={isCancelingRound}
-                    >
-                      {isCancelingRound ? "取消中..." : "取消本轮"}
-                    </Button>
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <Button
+                        type="button"
+                        onClick={handleStartGame}
+                        disabled={isStartingGame || !room.preparedQuestionSetId}
+                      >
+                        {isStartingGame ? "启动中..." : "开始游戏"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={handleCancelRound}
+                        disabled={isCancelingRound}
+                      >
+                        {isCancelingRound ? "取消中..." : "取消本轮"}
+                      </Button>
+                      {!room.preparedQuestionSetId ? (
+                        <p className="basis-full text-sm text-[var(--muted)]">出题人准备好题库后才能开始。</p>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
               ) : null}

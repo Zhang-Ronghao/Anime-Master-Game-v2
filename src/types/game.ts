@@ -17,6 +17,7 @@ export type Room = {
   status: RoomStatus;
   currentPresenterPlayerId?: string | null;
   currentGameId?: string | null;
+  preparedQuestionSetId?: string | null;
   createdAt: number | string;
   updatedAt?: string;
 };
@@ -28,6 +29,7 @@ export type DbRoom = {
   game_status: RoomStatus;
   current_presenter_player_id: string | null;
   current_game_id: string | null;
+  prepared_question_set_id?: string | null;
   created_at: string;
   updated_at: string;
 };

@@ -7,6 +7,7 @@ create table if not exists public.rooms (
   game_status text not null default 'LOBBY',
   current_presenter_player_id text,
   current_game_id uuid,
+  prepared_question_set_id uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

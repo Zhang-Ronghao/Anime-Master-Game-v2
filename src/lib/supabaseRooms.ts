@@ -42,6 +42,7 @@ function toRoom(room: DbRoom, players: DbPlayer[] = []): Room {
     status: room.game_status,
     currentPresenterPlayerId: room.current_presenter_player_id,
     currentGameId: room.current_game_id,
+    preparedQuestionSetId: room.prepared_question_set_id ?? null,
     createdAt: room.created_at,
     updatedAt: room.updated_at,
   };
@@ -499,6 +500,8 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
     .update({
       current_presenter_player_id: presenterPlayerId,
       game_status: "QUESTION_SETUP",
+      current_game_id: null,
+      prepared_question_set_id: null,
     })
     .eq("id", roomId)
     .eq("host_player_id", hostPlayerId)
@@ -525,6 +528,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
     .update({
       current_presenter_player_id: null,
       current_game_id: null,
+      prepared_question_set_id: null,
       game_status: "LOBBY",
     })
     .eq("id", roomId)
@@ -699,8 +703,56 @@ export async function getCommunityQuestionSets(sort: "latest" | "rating" = "late
   return questionSets;
 }
 
+export async function prepareQuestionSetForStart(params: {
+  roomId: string;
+  presenterPlayerId: string;
+  questionSetId: string;
+}) {
+  assertSupabaseEnv();
+
+  const { data: questionSet, error: questionSetError } = await supabase
+    .from("question_sets")
+    .select("*")
+    .eq("id", params.questionSetId)
+    .maybeSingle<DbQuestionSet>();
+
+  if (questionSetError) {
+    throw new Error(questionSetError.message);
+  }
+
+  if (!questionSet || questionSet.image_count <= 0) {
+    throw new Error("题库不存在或没有图片。");
+  }
+
+  if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
+    throw new Error("只能使用自己创建的题库或公开社区题库。");
+  }
+
+  const { data: room, error } = await supabase
+    .from("rooms")
+    .update({
+      prepared_question_set_id: params.questionSetId,
+    })
+    .eq("id", params.roomId)
+    .eq("current_presenter_player_id", params.presenterPlayerId)
+    .eq("game_status", "QUESTION_SETUP")
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!room) {
+    throw new Error("只有当前出题人可以通知房主题库已准备好。");
+  }
+
+  return toRoom(room);
+}
+
 export async function startGameWithQuestionSet(params: {
   roomId: string;
+  hostPlayerId: string;
   presenterPlayerId: string;
   questionSetId: string;
   maxRevealRounds?: number;
@@ -713,7 +765,9 @@ export async function startGameWithQuestionSet(params: {
     .from("rooms")
     .select("*")
     .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
     .eq("current_presenter_player_id", params.presenterPlayerId)
+    .eq("prepared_question_set_id", params.questionSetId)
     .eq("game_status", "QUESTION_SETUP")
     .maybeSingle<DbRoom>();
 
@@ -722,7 +776,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("只有当前出题人可以开始游戏。");
+    throw new Error("只有房主可以在出题人准备完成后开始游戏。");
   }
 
   const { data: questionSet, error: questionSetError } = await supabase
@@ -772,10 +826,13 @@ export async function startGameWithQuestionSet(params: {
     .from("rooms")
     .update({
       current_game_id: gameSession.id,
+      prepared_question_set_id: null,
       game_status: "PLAYING",
     })
     .eq("id", params.roomId)
+    .eq("host_player_id", params.hostPlayerId)
     .eq("current_presenter_player_id", params.presenterPlayerId)
+    .eq("prepared_question_set_id", params.questionSetId)
     .eq("game_status", "QUESTION_SETUP")
     .select()
     .maybeSingle<DbRoom>();
@@ -1781,6 +1838,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
     .update({
       current_presenter_player_id: null,
       current_game_id: null,
+      prepared_question_set_id: null,
       game_status: "LOBBY",
     })
     .eq("id", roomId)

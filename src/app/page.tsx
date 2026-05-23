@@ -126,7 +126,7 @@ export default function HomePage() {
             Anime Master Game
           </div>
           <h1 className="max-w-2xl text-4xl font-bold leading-tight text-slate-950 sm:text-5xl">
-            动漫高手
+            动漫高手·一眼顶针
           </h1>
           <p className="mt-5 max-w-xl text-base leading-7 text-[var(--muted)]">
             根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称。
