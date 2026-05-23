@@ -6,6 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
 import { FormField } from "@/components/FormField";
 import { Panel } from "@/components/Panel";
+import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { createNewLocalPlayerSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import { createSupabaseRoom, getRoomByCode, joinSupabaseRoom } from "@/lib/supabaseRooms";
 
@@ -130,6 +131,9 @@ export default function HomePage() {
           <p className="mt-5 max-w-xl text-base leading-7 text-[var(--muted)]">
             根据动画截图猜动画的多人实时小游戏。创建房间、选择出题人、上传或选择社区题库，实时揭露图片并猜出动画名称。
           </p>
+          <div className="mt-6">
+            <QuestionGuideButton className="w-full sm:w-auto" />
+          </div>
           <div className="mt-8 grid max-w-xl gap-3 sm:grid-cols-3">
             <div className="rounded-lg border border-white bg-white/70 p-4 shadow-sm">
               <p className="text-2xl font-bold text-slate-950">6 位</p>

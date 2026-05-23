@@ -161,24 +161,100 @@ const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
 
+export type QuestionImportItem = {
+  imageUrl: string;
+  labelText?: string | null;
+};
+
+function isHttpImageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function parseImageUrlsText(imageUrlsText: string) {
   return Array.from(
     new Set(
       imageUrlsText
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter((line) => {
-          if (!line) return false;
-
-          try {
-            const url = new URL(line);
-            return url.protocol === "http:" || url.protocol === "https:";
-          } catch {
-            return false;
-          }
-        }),
+        .filter((line) => line && isHttpImageUrl(line)),
     ),
   );
+}
+
+function normalizeQuestionImportItems(items: QuestionImportItem[]) {
+  const seenUrls = new Set<string>();
+  const normalizedItems: QuestionImportItem[] = [];
+
+  for (const item of items) {
+    const imageUrl = item.imageUrl.trim();
+
+    if (!imageUrl || !isHttpImageUrl(imageUrl) || seenUrls.has(imageUrl)) {
+      continue;
+    }
+
+    seenUrls.add(imageUrl);
+    normalizedItems.push({
+      imageUrl,
+      labelText: item.labelText?.trim() || null,
+    });
+  }
+
+  return normalizedItems;
+}
+
+export function parseQuestionImportText(importText: string): QuestionImportItem[] {
+  const items: QuestionImportItem[] = [];
+
+  for (const [index, rawLine] of importText.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+
+    if (!line) {
+      continue;
+    }
+
+    if (!line.startsWith("{")) {
+      if (isHttpImageUrl(line)) {
+        items.push({ imageUrl: line });
+      }
+      continue;
+    }
+
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`第 ${index + 1} 行不是有效 JSON。`);
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error(`第 ${index + 1} 行必须是 JSON 对象。`);
+    }
+
+    const record = parsed as Record<string, unknown>;
+
+    if (typeof record.image_url !== "string" || !isHttpImageUrl(record.image_url.trim())) {
+      throw new Error(`第 ${index + 1} 行缺少有效的 image_url。`);
+    }
+
+    if (record.label_text != null && typeof record.label_text !== "string") {
+      throw new Error(`第 ${index + 1} 行的 label_text 必须是字符串。`);
+    }
+
+    const labelText = typeof record.label_text === "string" ? record.label_text : null;
+
+    items.push({
+      imageUrl: record.image_url,
+      labelText,
+    });
+  }
+
+  return normalizeQuestionImportItems(items);
 }
 
 function imageUrlsToText(imageUrls: string[]) {
@@ -472,12 +548,16 @@ export async function createUploadedQuestionSet(params: {
   presenterPlayerId: string;
   title: string;
   description?: string;
-  imageUrls: string[];
+  imageUrls?: string[];
+  questions?: QuestionImportItem[];
 }) {
   assertSupabaseEnv();
 
   const title = params.title.trim();
-  const imageUrls = params.imageUrls.map((url) => url.trim()).filter(Boolean);
+  const questionItems = normalizeQuestionImportItems(
+    params.questions ?? params.imageUrls?.map((imageUrl) => ({ imageUrl })) ?? [],
+  );
+  const imageUrls = questionItems.map((item) => item.imageUrl);
 
   if (!title) {
     throw new Error("请先输入题库标题。");
@@ -524,11 +604,19 @@ export async function createUploadedQuestionSet(params: {
   const { data: questions, error: questionsError } = await supabase
     .from("questions")
     .insert(
-      imageUrls.map((imageUrl, index) => ({
-        question_set_id: questionSet.id,
-        image_url: imageUrl,
-        order_index: index,
-      })),
+      imageUrls.map((imageUrl, index) => {
+        const labelText = questionItems[index].labelText;
+
+        return {
+          question_set_id: questionSet.id,
+          image_url: imageUrl,
+          order_index: index,
+          label_text: labelText,
+          label_source: labelText ? "manual" : null,
+          label_updated_by_player_id: labelText ? params.presenterPlayerId : null,
+          label_updated_at: labelText ? new Date().toISOString() : null,
+        };
+      }),
     )
     .select()
     .order("order_index", { ascending: true })
@@ -548,9 +636,9 @@ export async function createQuestionSetFromUrlText(params: {
   description?: string;
   imageUrlsText: string;
 }) {
-  const imageUrls = parseImageUrlsText(params.imageUrlsText);
+  const questions = parseQuestionImportText(params.imageUrlsText);
 
-  if (imageUrls.length === 0) {
+  if (questions.length === 0) {
     throw new Error("至少需要 1 个有效的 http/https 图片 URL。");
   }
 
@@ -559,7 +647,7 @@ export async function createQuestionSetFromUrlText(params: {
     presenterPlayerId: params.presenterPlayerId,
     title: params.title,
     description: params.description,
-    imageUrls,
+    questions,
   });
 }
 

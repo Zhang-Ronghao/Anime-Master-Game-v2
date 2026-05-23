@@ -6,6 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
 import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
+import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
 import { supabase } from "@/lib/supabaseClient";
@@ -775,11 +776,14 @@ export default function RoomPage() {
               {isHost ? <span className="ml-2 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">房主</span> : null}
             </p>
           </div>
-          {isHost ? (
-            <Button className="shrink-0" type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-              {isDissolving ? "解散中..." : "解散房间"}
-            </Button>
-          ) : null}
+          <div className="flex shrink-0 flex-wrap justify-end gap-3">
+            <QuestionGuideButton />
+            {isHost ? (
+              <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
+                {isDissolving ? "解散中..." : "解散房间"}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 

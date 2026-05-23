@@ -16,6 +16,7 @@ import {
   createUploadedQuestionSet,
   getCommunityQuestionSets,
   parseImageUrlsText,
+  parseQuestionImportText,
   startGameWithQuestionSet,
 } from "@/lib/supabaseRooms";
 import type { QuestionSet, Room } from "@/types/game";
@@ -97,6 +98,7 @@ export function QuestionSetUploader({
 }: QuestionSetUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const jsonlInputRef = useRef<HTMLInputElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<SetupMode>("upload");
   const [title, setTitle] = useState("");
@@ -104,6 +106,7 @@ export function QuestionSetUploader({
   const [urlText, setUrlText] = useState("");
   const [items, setItems] = useState<UploadableImage[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isDraggingImport, setIsDraggingImport] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isCreatingFromText, setIsCreatingFromText] = useState(false);
   const [isLoadingCommunity, setIsLoadingCommunity] = useState(false);
@@ -119,6 +122,22 @@ export function QuestionSetUploader({
 
   const previewUrls = useMemo(() => getQuestionSetUrls(questionSet), [questionSet]);
   const previewItems = useMemo(() => getQuestionSetPreviewItems(questionSet), [questionSet]);
+  const importPreview = useMemo(() => {
+    try {
+      const importItems = parseQuestionImportText(urlText);
+      return {
+        items: importItems,
+        labeledCount: importItems.filter((item) => item.labelText?.trim()).length,
+        error: null,
+      };
+    } catch (error) {
+      return {
+        items: [],
+        labeledCount: 0,
+        error: error instanceof Error ? error.message : "JSONL 格式错误。",
+      };
+    }
+  }, [urlText]);
   const urlsTextForPreview = previewUrls.join("\n");
   const progressPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   const filteredCommunitySets = useMemo(() => {
@@ -202,6 +221,34 @@ export function QuestionSetUploader({
     event.preventDefault();
     setIsDragging(false);
     addFiles(event.dataTransfer.files);
+  }
+
+  async function readJsonlFiles(fileList: FileList | File[] | null) {
+    const files = Array.from(fileList ?? []).filter((file) => /\.jsonl$/i.test(file.name) || file.type === "application/json");
+
+    if (files.length === 0) {
+      onError("请上传 .jsonl 文件。");
+      return;
+    }
+
+    try {
+      const texts = await Promise.all(files.map((file) => file.text()));
+      setUrlText(texts.join("\n"));
+      resetCreatedSet();
+      clearError();
+    } catch {
+      onError("读取 JSONL 文件失败，请重试。");
+    } finally {
+      if (jsonlInputRef.current) {
+        jsonlInputRef.current.value = "";
+      }
+    }
+  }
+
+  function handleImportDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsDraggingImport(false);
+    readJsonlFiles(event.dataTransfer.files);
   }
 
   async function createQuestionSetFromUrls(imageUrls: string[]) {
@@ -355,7 +402,7 @@ export function QuestionSetUploader({
       <div className="grid gap-2 sm:grid-cols-3">
         {[
           ["upload", "上传图片"],
-          ["urlText", "粘贴 URL 文本"],
+          ["urlText", "URL / JSONL 导入"],
           ["community", "选择社区题库"],
         ].map(([value, label]) => (
           <button
@@ -461,11 +508,44 @@ export function QuestionSetUploader({
 
       {mode === "urlText" ? (
         <div className="space-y-3 rounded-md border border-[var(--line)] bg-slate-50 p-4">
+          <div
+            className={`rounded-md border-2 border-dashed p-4 transition ${
+              isDraggingImport ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-white"
+            }`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsDraggingImport(true);
+            }}
+            onDragLeave={() => setIsDraggingImport(false)}
+            onDrop={handleImportDrop}
+          >
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">粘贴 URL 文本，或上传 JSONL 文件</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  JSONL 每行一个对象：{"{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"}
+                </p>
+              </div>
+              <Button type="button" variant="secondary" onClick={() => jsonlInputRef.current?.click()}>
+                选择 JSONL
+              </Button>
+            </div>
+            <input
+              ref={jsonlInputRef}
+              className="hidden"
+              type="file"
+              accept=".jsonl,application/json"
+              multiple
+              onChange={(event) => readJsonlFiles(event.target.files)}
+            />
+          </div>
           <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">图片 URL 文本</span>
+            <span className="mb-2 block text-sm font-medium text-slate-900">图片 URL / JSONL 文本</span>
             <textarea
               className="min-h-44 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              placeholder={"每行一个 http/https 图片 URL\nhttps://res.cloudinary.com/.../image.webp"}
+              placeholder={
+                "每行一个 http/https 图片 URL\nhttps://res.cloudinary.com/.../image.webp\n\n或每行一个 JSON 对象\n{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"
+              }
               value={urlText}
               onChange={(event) => {
                 setUrlText(event.target.value);
@@ -474,9 +554,15 @@ export function QuestionSetUploader({
               }}
             />
           </label>
-          <p className="text-sm text-[var(--muted)]">检测到 {parseImageUrlsText(urlText).length} 个有效 URL。</p>
+          {importPreview.error ? (
+            <p className="text-sm text-red-600">{importPreview.error}</p>
+          ) : (
+            <p className="text-sm text-[var(--muted)]">
+              检测到 {importPreview.items.length} 个有效 URL，其中 {importPreview.labeledCount} 个带标签。
+            </p>
+          )}
           <Button type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
-            {isCreatingFromText ? "创建中..." : "用 URL 文本创建题库"}
+            {isCreatingFromText ? "创建中..." : "用 URL / JSONL 创建题库"}
           </Button>
         </div>
       ) : null}
