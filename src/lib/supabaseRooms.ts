@@ -541,7 +541,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
   }
 
   if (!room) {
-    throw new Error("只有房主可以取消本轮。");
+    throw new Error("只有房主可以取消本局。");
   }
 
   return toRoom(room);
@@ -1791,7 +1791,7 @@ export async function endCurrentGameEarly(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以提前结束本轮游戏。");
+    throw new Error("只有当前出题人可以提前结束本局游戏。");
   }
 
   const endedAt = new Date().toISOString();

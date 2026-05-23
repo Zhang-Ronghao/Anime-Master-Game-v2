@@ -634,7 +634,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
-    const confirmed = window.confirm("确定要提前结束本轮游戏并进入排行榜吗？");
+    const confirmed = window.confirm("确定要提前结束本局游戏并进入排行榜吗？");
 
     if (!confirmed) {
       return;
@@ -649,7 +649,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setGameSession(ended.gameSession);
       onRoomUpdated?.(ended.room);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "提前结束本轮失败。");
+      onError(error instanceof Error ? error.message : "提前结束本局失败。");
     } finally {
       setIsEndingGame(false);
     }
@@ -819,7 +819,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               {isSkippingQuestion ? "跳过中..." : "跳过本题"}
             </Button>
             <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-              {isEndingGame ? "结束中..." : "结束本轮游戏"}
+              {isEndingGame ? "结束中..." : "结束本局游戏"}
             </Button>
           </div>
         </>

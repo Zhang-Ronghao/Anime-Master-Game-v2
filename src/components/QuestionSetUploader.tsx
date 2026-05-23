@@ -386,7 +386,7 @@ export function QuestionSetUploader({
   return (
     <div className="mt-5 space-y-4 rounded-md border border-[var(--line)] bg-white p-4">
       <div>
-        <p className="font-semibold text-slate-900">你是本轮出题人，请准备题库。</p>
+        <p className="font-semibold text-slate-900">你是本局出题人，请准备题库。</p>
         <p className="mt-1 text-sm text-[var(--muted)]">
           选择一种题库来源，创建或选中题库后会通知房主，由房主开始游戏。
         </p>

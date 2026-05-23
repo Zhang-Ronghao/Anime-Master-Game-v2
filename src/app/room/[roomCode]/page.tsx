@@ -32,7 +32,7 @@ const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
   QUESTION_SETUP: "出题人准备题库",
   PLAYING: "游戏中",
-  GAME_RESULT: "本轮结算",
+  GAME_RESULT: "本局结算",
 };
 
 type GameSettings = {
@@ -81,7 +81,7 @@ function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[
                   <p className="truncate font-semibold">{player.nickname}</p>
                   <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
                     {player.id === playerId ? <span>当前标签页玩家</span> : null}
-                    {isPresenter ? <span>本轮出题人</span> : null}
+                    {isPresenter ? <span>本局出题人</span> : null}
                   </div>
                 </div>
               </div>
@@ -103,10 +103,10 @@ function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[
 }
 
 function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: boolean; isCurrentPresenter: boolean }) {
-  let text = "等待房主选择本轮出题人。";
+  let text = "等待房主选择本局出题人。";
 
   if (room.status === "LOBBY") {
-    text = isHost ? "先在大厅设置本轮参数，然后选择一名出题人。" : "等待房主设置参数并选择出题人。";
+    text = isHost ? "先在大厅设置本局参数，然后选择一名出题人。" : "等待房主设置参数并选择出题人。";
   } else if (room.status === "QUESTION_SETUP") {
     text = isCurrentPresenter
       ? "选择上传、URL 文本或社区题库，创建题库预览后通知房主开始游戏。"
@@ -114,7 +114,7 @@ function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: b
         ? "出题人已准备好题库，等待房主开始游戏。"
         : "等待出题人准备题库。";
   } else if (room.status === "GAME_RESULT") {
-    text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一轮。" : "查看排行榜并评分，等待房主回到大厅。";
+    text = isHost ? "查看排行榜、发布或评分题库后，可以回到房间大厅开始下一局。" : "查看排行榜并评分，等待房主回到大厅。";
   }
 
   return <p className="mt-4 rounded-md border border-rose-100 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">{text}</p>;
@@ -148,9 +148,9 @@ function GameSettingsPanel({
   }
 
   return (
-    <Panel title="本轮游戏设置">
+    <Panel title="本局游戏设置">
       <p className="text-sm leading-6 text-[var(--muted)]">
-        这里设置揭露轮数、每轮倒计时和每轮答对分数。设置会在房主点击“开始游戏”时写入本轮游戏。
+        这里设置每张图片的揭露轮数、每轮倒计时和每轮答对分数。设置会在房主点击“开始游戏”时写入本局游戏。
       </p>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block">
@@ -354,9 +354,9 @@ function GameResultPanel({
     <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
       <Panel title="最终排行榜">
         {isLoadingLeaderboard ? (
-          <p className="text-sm text-[var(--muted)]">正在读取本轮分数...</p>
+          <p className="text-sm text-[var(--muted)]">正在读取本局分数...</p>
         ) : leaderboard.length === 0 ? (
-          <p className="text-sm text-[var(--muted)]">本轮没有玩家得分。</p>
+          <p className="text-sm text-[var(--muted)]">本局没有玩家得分。</p>
         ) : (
           <div className="overflow-hidden rounded-md border border-[var(--line)]">
             <table className="w-full text-left text-sm">
@@ -391,13 +391,13 @@ function GameResultPanel({
               <p className="mt-2 text-xl font-semibold">{statusText[room.status]}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-              <p className="text-sm text-[var(--muted)]">本轮出题人</p>
+              <p className="text-sm text-[var(--muted)]">本局出题人</p>
               <p className="mt-2 text-xl font-semibold">{presenterName}</p>
             </div>
           </div>
           <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
           <p className="mt-4 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
-            本轮结算已生成，分数只统计当前 game_session。
+            本局结算已生成，分数只统计当前 game_session。
           </p>
           {isHost ? (
             <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
@@ -740,7 +740,7 @@ export default function RoomPage() {
       const nextRoom = await cancelCurrentRound(room.id, playerId);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "取消本轮失败，请稍后重试。");
+      setError(caughtError instanceof Error ? caughtError.message : "取消本局失败，请稍后重试。");
     } finally {
       setIsCancelingRound(false);
     }
@@ -886,7 +886,7 @@ export default function RoomPage() {
                   <p className="mt-2 text-xl font-semibold">{statusText[room.status]}</p>
                 </div>
                 <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-                  <p className="text-sm text-[var(--muted)]">本轮出题人</p>
+                  <p className="text-sm text-[var(--muted)]">本局出题人</p>
                   <p className="mt-2 text-xl font-semibold">{presenterName}</p>
                 </div>
               </div>
@@ -924,7 +924,7 @@ export default function RoomPage() {
                         onClick={handleCancelRound}
                         disabled={isCancelingRound}
                       >
-                        {isCancelingRound ? "取消中..." : "取消本轮"}
+                        {isCancelingRound ? "取消中..." : "取消本局"}
                       </Button>
                       {!room.preparedQuestionSetId ? (
                         <p className="basis-full text-sm text-[var(--muted)]">出题人准备好题库后才能开始。</p>
