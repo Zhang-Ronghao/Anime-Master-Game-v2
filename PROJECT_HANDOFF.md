@@ -10,12 +10,12 @@
 
 1. 房主创建房间。
 2. 其他玩家输入房间号和昵称加入同一房间。
-3. 房主在房间内选择一名玩家作为本轮出题人，出题人可以是房主自己。
-4. 出题人上传一批动画截图作为本轮题库，或从社区题库选择已有题库。
+3. 房主在房间内选择一名玩家作为本局出题人，出题人可以是房主自己。
+4. 出题人上传一批动画截图作为本局题库，或从社区题库选择已有题库。
 5. 游戏逐题进行。
 6. 每张图片初始对普通玩家显示为全黑。
-7. 图片被切成 4 x 7 共 28 个网格块。
-8. 出题人能看到原图和网格，并选择本轮揭露哪些块。
+7. 图片按横屏 5 x 9、竖屏 9 x 5 共 45 个网格块揭露。
+8. 出题人能看到原图和网格，并选择当前轮揭露哪些块。
 9. 普通玩家只看到已揭露块，并在限时内提交答案。
 10. 所有答案只对出题人可见。
 11. 出题人判定哪些玩家答对。
@@ -24,8 +24,8 @@
 14. 未答对玩家进入下一轮揭露。
 15. 所有玩家答对，或达到本题最大轮数后，进入下一题。
 16. 题库全部出完后进入结算，展示排行榜。
-17. 房主可以回到大厅，重新选择出题人开始下一轮。
-18. 本轮上传题库后续可发布到社区。
+17. 房主可以回到大厅，重新选择出题人开始下一局。
+18. 本局上传题库后续可发布到社区。
 19. 后续其他出题人可从社区加载题库并评分。
 
 ### 1.2 当前 MVP 不需要
@@ -38,7 +38,7 @@
 - 复杂标准答案系统。
 - Cloudinary signed upload 的完整服务端签名流程。
 
-### 1.3 当前 MVP 已经做到流程 6
+### 1.3 当前 MVP 已覆盖的基础流程
 
 已经完成：
 
@@ -48,9 +48,9 @@
 - 玩家列表实时同步。
 - 房主选择出题人。
 - 出题人批量上传题库到 Cloudinary。
-- 出题人从 Cloudinary 已有图片临时加载题库。
+- 出题人可通过上传、URL / JSONL 导入或社区题库准备题库。
 - Supabase 存储题库、题目、游戏会话。
-- PLAYING 状态图片 4 x 7 分块揭露。
+- PLAYING 状态图片 45 块分块揭露。
 - 出题人确认揭露。
 - 普通玩家黑色遮罩，只显示已揭露区域。
 - 倒计时。
@@ -98,9 +98,9 @@
 房间页：
 
 - LOBBY：显示玩家列表、状态、房主选择出题人区域。
-- QUESTION_SETUP：隐藏玩家列表，显示状态和本轮出题人；当前出题人显示题库准备 UI。
+- QUESTION_SETUP：出题人显示题库准备 UI；其他玩家仍停留在大厅式界面，显示等待出题状态。
 - PLAYING：隐藏玩家列表和状态面板，只显示游戏主体：题号、轮次、分数、倒计时、积分榜、图片、操作区。
-- GAME_RESULT：当前只是基础结算状态展示，后续需要完善最终排行榜和回大厅。
+- GAME_RESULT：本局结算，展示排行榜、社区发布/评分入口和房主回大厅操作。
 
 ### `/api/cloudinary-images`
 
@@ -109,7 +109,7 @@
 - 从 Cloudinary 指定 folder 读取已有图片。
 - 用于测试阶段复用 Cloudinary 已保存图片，避免每次重新上传。
 - 使用服务端 `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET`。
-- 后续社区题库完成后可以删除或替换。
+- 当前主流程不依赖，后续可以删除或替换。
 
 ## 4. 当前状态机
 
@@ -124,7 +124,7 @@ export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
 - `LOBBY`：房间大厅。
 - `QUESTION_SETUP`：出题人准备题库。
 - `PLAYING`：游戏进行中。
-- `GAME_RESULT`：本轮结算。
+- `GAME_RESULT`：本局结算。
 
 ## 5. 当前数据库结构
 
@@ -134,6 +134,9 @@ SQL 文件：
 - `supabase/migrations/002_question_sets_game_sessions.sql`
 - `supabase/migrations/003_answers_scores_results.sql`
 - `supabase/migrations/004_game_session_settings.sql`
+- `supabase/migrations/005_community_question_sets.sql`
+- `supabase/migrations/question-label-migration.sql`
+- `supabase/migrations/006_prepared_question_set.sql`
 
 ### 5.1 `rooms`
 
@@ -144,6 +147,7 @@ host_player_id text not null
 game_status text not null default 'LOBBY'
 current_presenter_player_id text
 current_game_id uuid
+prepared_question_set_id uuid
 created_at timestamptz not null default now()
 updated_at timestamptz not null default now()
 ```
@@ -153,6 +157,7 @@ updated_at timestamptz not null default now()
 - `host_player_id` 是前端生成的临时玩家 ID，不是 Supabase Auth 用户 ID。
 - `current_presenter_player_id` 是当前出题人。
 - `current_game_id` 指向当前 `game_sessions.id`。
+- `prepared_question_set_id` 是出题人已准备好、等待房主开始游戏的题库。
 
 ### 5.2 `players`
 
@@ -216,8 +221,8 @@ round_scores jsonb not null default '[3, 2, 1]'::jsonb
 
 说明：
 
-- `revealed_blocks` 存储当前题已揭露块索引，0 到 27。
-- `max_reveal_rounds`、`round_seconds`、`round_scores` 在游戏开始前由出题人设置。
+- `revealed_blocks` 存储当前题已揭露块索引，0 到 44。
+- `max_reveal_rounds`、`round_seconds`、`round_scores` 在游戏开始前由房主设置。
 
 ### 5.6 `answers`
 
@@ -325,11 +330,9 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
   - 选择文件夹。
   - 拖拽图片。
   - Canvas 压缩后上传 Cloudinary。
-  - 从 Cloudinary 已有图片创建题库。
-  - 游戏开始前设置：
-    - 揭露轮数。
-    - 每轮倒计时。
-    - 每轮分数。
+  - URL / JSONL 导入题库。
+  - 选择社区题库。
+  - 创建或选择题库后写入 `rooms.prepared_question_set_id`，通知房主开始游戏。
 
 - `src/components/ImageRevealGame.tsx`
   - PLAYING 状态核心游戏 UI。
@@ -374,15 +377,18 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 
 ### 8.3 准备题库
 
-- QUESTION_SETUP 隐藏玩家列表，但保留状态和本轮出题人。
-- 当前出题人看到题库上传/加载 UI。
-- 非出题人看到等待出题人准备题库。
+- QUESTION_SETUP 中，当前出题人进入题库准备 UI。
+- 非出题人仍看到大厅式界面、玩家列表、本局设置和等待出题状态。
 - 出题人可以：
   - 输入题库标题。
   - 批量上传图片。
-  - 从 Cloudinary 已有图片创建题库。
-  - 设置游戏参数。
-  - 点击开始游戏。
+  - 粘贴 URL 文本或导入 JSONL。
+  - 选择社区题库。
+  - 创建或选中题库后通知房主。
+- 房主可以：
+  - 在大厅式界面设置每张图片的揭露轮数、每轮倒计时、每轮分数。
+  - 出题人准备好题库后，房主点击开始游戏。
+  - 准备完成前不能开始游戏。
 
 ### 8.4 图片上传
 
@@ -401,7 +407,7 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 
 ### 8.5 开始游戏
 
-点击开始游戏后：
+房主点击开始游戏后：
 
 - 创建 `game_sessions`
 - 写入：
@@ -413,7 +419,7 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 
 ### 8.6 PLAYING 揭露
 
-- 图片切成 4 x 7，共 28 块。
+- 图片切成 45 块；横屏 5 x 9，竖屏 9 x 5。
 - 出题人看到原图和网格。
 - 出题人选择块后点击“确认揭露”。
 - `game_sessions.revealed_blocks` 更新。
@@ -423,7 +429,7 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 
 ### 8.7 答题
 
-- 非出题玩家在本轮开始后可提交答案。
+- 非出题玩家在当前揭露轮开始后可提交答案。
 - 倒计时内可修改答案。
 - 出题人不能提交答案。
 - 普通玩家只看到自己的答案。
@@ -477,31 +483,24 @@ CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 - 玩家关闭浏览器不一定立即从 `players` 删除。
 - 房主关闭窗口不会自动解散房间；这是为了支持刷新恢复。
 - 旧房间不会自动过期清理。
-- 当前 GAME_RESULT 还没有完整排行榜/回大厅流程。
-- 当前没有社区题库正式功能。
-- `/api/cloudinary-images` 是临时测试接口，后续社区题库完成后应替换。
+- GAME_RESULT 已有排行榜、社区发布/评分和房主回大厅流程，仍可继续优化展示效果。
+- 社区题库已支持发布、搜索、预览、选择和评分。
+- `/api/cloudinary-images` 是临时测试接口，当前主流程不依赖，后续可删除或替换。
 - 当前答案没有标准答案或模糊匹配，完全由出题人判分。
 - 当前没有下一题过渡动画。
-- 当前没有本轮结束提示音/提示动效。
+- 当前没有本局结束提示音/提示动效。
 
 ## 11. 后续开发建议
 
 下一阶段建议优先做：
 
-1. 完善 GAME_RESULT：
-   - 最终排行榜。
-   - 房主返回 LOBBY。
-   - 清空 `current_game_id` / `current_presenter_player_id` 或进入下一轮准备。
-2. 社区题库：
-   - 发布当前题库为公开。
-   - 从社区加载题库。
-   - 评分。
-3. 房间清理：
+1. 房间清理：
    - presence 或心跳。
    - 过期房间清理策略。
-4. 权限增强：
+2. 权限增强：
    - 若后续上线，需要 Supabase Auth 或服务端 API + RLS。
-5. 优化游戏体验：
+   - 当前不要直接给现有 `postgres_changes` 表同步套 RLS；之前尝试会导致实时同步受影响。
+3. 优化游戏体验：
    - 下一题过渡。
    - 答案提交反馈。
    - 判分完成提示。
@@ -524,6 +523,9 @@ supabase/migrations/001_rooms_players.sql
 supabase/migrations/002_question_sets_game_sessions.sql
 supabase/migrations/003_answers_scores_results.sql
 supabase/migrations/004_game_session_settings.sql
+supabase/migrations/005_community_question_sets.sql
+supabase/migrations/question-label-migration.sql
+supabase/migrations/006_prepared_question_set.sql
 ```
 
 ## 13. 启动和测试
