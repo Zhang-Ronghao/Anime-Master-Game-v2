@@ -269,11 +269,12 @@ export async function createSupabaseRoom(playerId: string, nickname: string) {
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const { data: room, error: roomError } = await supabase
-      .rpc("create_room_with_host", {
-        p_room_code: roomCode,
-        p_player_id: playerId,
-        p_nickname: nickname,
+      .from("rooms")
+      .insert({
+        room_code: roomCode,
+        host_player_id: playerId,
       })
+      .select()
       .single<DbRoom>();
 
     if (roomError) {
@@ -285,8 +286,31 @@ export async function createSupabaseRoom(playerId: string, nickname: string) {
       throw new Error(roomError.message);
     }
 
-    const players = await getDbPlayersByRoomId(room.id);
-    return toRoom(room, players);
+    const { error: playerError } = await supabase.from("players").upsert(
+      {
+        id: playerId,
+        room_id: room.id,
+        nickname,
+        is_host: true,
+        last_seen_at: new Date().toISOString(),
+      },
+      { onConflict: "id" },
+    );
+
+    if (playerError) {
+      throw new Error(playerError.message);
+    }
+
+    return toRoom(room, [
+      {
+        id: playerId,
+        room_id: room.id,
+        nickname,
+        is_host: true,
+        joined_at: new Date().toISOString(),
+        last_seen_at: new Date().toISOString(),
+      },
+    ]);
   }
 
   throw new Error("生成房间号失败，请重试。");
@@ -295,7 +319,11 @@ export async function createSupabaseRoom(playerId: string, nickname: string) {
 export async function getRoomByCode(roomCode: string) {
   assertSupabaseEnv();
 
-  const { data: room, error } = await supabase.rpc("find_room_by_code", { p_room_code: roomCode }).maybeSingle<DbRoom>();
+  const { data: room, error } = await supabase
+    .from("rooms")
+    .select("*")
+    .eq("room_code", roomCode)
+    .maybeSingle<DbRoom>();
 
   if (error) {
     throw new Error(error.message);
@@ -338,35 +366,57 @@ export async function getPlayersByRoomId(roomId: string) {
 }
 
 export async function joinSupabaseRoom(roomCode: string, playerId: string, nickname: string) {
-  assertSupabaseEnv();
-
-  const { data: room, error } = await supabase
-    .rpc("join_room_with_player", {
-      p_room_code: roomCode,
-      p_player_id: playerId,
-      p_nickname: nickname,
-    })
-    .maybeSingle<DbRoom>();
-
-  if (error) {
-    if (isUniqueViolation(error)) {
-      return {
-        room: null,
-        error:
-          error.message.includes("players_room_nickname_unique")
-            ? "该昵称已在房间中使用，请换一个昵称。"
-            : `房间人数已满，最多 ${MAX_PLAYERS_PER_ROOM} 人。`,
-      };
-    }
-
-    throw new Error(error.message);
-  }
+  const room = await getRoomByCode(roomCode);
 
   if (!room) {
     return {
       room: null,
       error: "房间不存在。请检查房间号是否正确。",
     };
+  }
+
+  const players = await getDbPlayersByRoomId(room.id);
+  const duplicatedNickname = players.some(
+    (player) => player.id !== playerId && player.nickname.trim().toLowerCase() === nickname.trim().toLowerCase(),
+  );
+
+  if (duplicatedNickname) {
+    return {
+      room: null,
+      error: "该昵称已在房间中使用，请换一个昵称。",
+    };
+  }
+
+  const isExistingPlayer = players.some((player) => player.id === playerId);
+
+  if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
+    return {
+      room: null,
+      error: `房间人数已满，最多 ${MAX_PLAYERS_PER_ROOM} 人。`,
+    };
+  }
+
+  const isHost = room.host_player_id === playerId;
+  const { error } = await supabase.from("players").upsert(
+    {
+      id: playerId,
+      room_id: room.id,
+      nickname,
+      is_host: isHost,
+      last_seen_at: new Date().toISOString(),
+    },
+    { onConflict: "id" },
+  );
+
+  if (error) {
+    if (isUniqueViolation(error)) {
+      return {
+        room: null,
+        error: "该昵称已在房间中使用，请换一个昵称。",
+      };
+    }
+
+    throw new Error(error.message);
   }
 
   const nextPlayers = await getDbPlayersByRoomId(room.id);
@@ -420,7 +470,6 @@ export function dissolveSupabaseRoomOnPageExit(roomId: string, playerId: string)
         apikey: supabaseAnonKey,
         Authorization: `Bearer ${supabaseAnonKey}`,
         Prefer: "return=minimal",
-        "x-player-id": playerId,
       },
     });
   } catch {

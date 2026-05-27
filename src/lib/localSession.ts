@@ -2,7 +2,6 @@
 
 import { STORAGE_KEYS } from "@/lib/constants";
 import { createPlayerId } from "@/lib/id";
-import { setSupabasePlayerContext } from "@/lib/supabaseClient";
 import type { LocalSession } from "@/types/game";
 
 const SESSION_KEYS = {
@@ -17,14 +16,12 @@ export function getOrCreatePlayerId() {
 
   if (existing) {
     sessionStorage.setItem(SESSION_KEYS.playerId, existing);
-    setSupabasePlayerContext(existing);
     return existing;
   }
 
   const playerId = createPlayerId();
   sessionStorage.setItem(SESSION_KEYS.playerId, playerId);
   localStorage.setItem(STORAGE_KEYS.playerId, playerId);
-  setSupabasePlayerContext(playerId);
   return playerId;
 }
 
@@ -42,7 +39,6 @@ export function saveLocalSession(session: Partial<LocalSession>) {
   if (session.playerId) {
     sessionStorage.setItem(SESSION_KEYS.playerId, session.playerId);
     localStorage.setItem(STORAGE_KEYS.playerId, session.playerId);
-    setSupabasePlayerContext(session.playerId);
   }
 
   if (session.nickname !== undefined) {
