@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -114,6 +114,10 @@ function toAnswer(answer: DbAnswer): Answer {
 type AnswerBubble = {
   id: string;
   text: string;
+  left: number;
+  top: number;
+  width: number;
+  placement: "below" | "side";
 };
 
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
@@ -146,6 +150,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
+  const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -195,12 +200,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const showAnswerBubble = useCallback((answer: Answer) => {
     const bubbleId = `${answer.id}:${answer.submittedAt}`;
+    const anchor = scoreRowRefs.current[answer.playerId];
+    const rect = anchor?.getBoundingClientRect();
+    const placement = rect && window.innerWidth >= 1024 ? "side" : "below";
+    const left = rect ? (placement === "side" ? rect.right + 8 : rect.left + 12) : 16;
+    const top = rect ? (placement === "side" ? rect.top + rect.height / 2 : rect.bottom + 8) : 16;
+    const width = rect ? (placement === "side" ? 224 : Math.max(160, rect.width - 24)) : 224;
 
     setAnswerBubbles((currentBubbles) => ({
       ...currentBubbles,
       [answer.playerId]: {
         id: bubbleId,
         text: answer.answerText,
+        left,
+        top,
+        width,
+        placement,
       },
     }));
 
@@ -724,10 +739,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         {scoreRows.map(({ player, score, correctCount }, index) => {
           const alreadyCorrect = correctPlayerSet.has(player.id);
           const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
-          const answerBubble = answerBubbles[player.id];
-
           return (
-            <div className="relative rounded-md bg-slate-50 px-3 py-2 text-sm" key={player.id}>
+            <div
+              className="rounded-md bg-slate-50 px-3 py-2 text-sm"
+              key={player.id}
+              ref={(element) => {
+                scoreRowRefs.current[player.id] = element;
+              }}
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0 font-semibold text-slate-950">
                   #{index + 1} {player.nickname}
@@ -743,11 +762,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
                 ) : null}
               </div>
-              {isPresenter && answerBubble ? (
-                <div className="pointer-events-none absolute left-3 right-3 top-full z-20 mt-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-950 shadow-lg lg:left-[calc(100%+0.5rem)] lg:right-auto lg:top-1/2 lg:mt-0 lg:w-56 lg:-translate-y-1/2">
-                  <span className="block truncate">{answerBubble.text}</span>
-                </div>
-              ) : null}
             </div>
           );
         })}
@@ -974,6 +988,23 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
+
+      {isPresenter
+        ? Object.values(answerBubbles).map((answerBubble) => (
+            <div
+              className="pointer-events-none fixed z-40 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-950 shadow-lg"
+              key={answerBubble.id}
+              style={{
+                left: answerBubble.left,
+                top: answerBubble.top,
+                width: answerBubble.width,
+                transform: answerBubble.placement === "side" ? "translateY(-50%)" : undefined,
+              }}
+            >
+              <span className="block truncate">{answerBubble.text}</span>
+            </div>
+          ))
+        : null}
 
       {isLabelModalOpen && canAddQuestionLabel ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
