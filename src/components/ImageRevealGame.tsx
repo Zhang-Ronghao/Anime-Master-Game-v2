@@ -19,7 +19,17 @@ import {
   submitAnswer,
   updateQuestionLabel,
 } from "@/lib/supabaseRooms";
-import type { Answer, DbGameSession, DbQuestion, GameSession, PlayerScore, Question, QuestionResult, Room } from "@/types/game";
+import type {
+  Answer,
+  DbAnswer,
+  DbGameSession,
+  DbQuestion,
+  GameSession,
+  PlayerScore,
+  Question,
+  QuestionResult,
+  Room,
+} from "@/types/game";
 
 type ImageRevealGameProps = {
   room: Room;
@@ -89,11 +99,29 @@ function toQuestion(question: DbQuestion): Question {
   };
 }
 
+function toAnswer(answer: DbAnswer): Answer {
+  return {
+    id: answer.id,
+    gameSessionId: answer.game_session_id,
+    questionIndex: answer.question_index,
+    revealRound: answer.reveal_round,
+    playerId: answer.player_id,
+    answerText: answer.answer_text,
+    submittedAt: answer.submitted_at,
+  };
+}
+
+type AnswerBubble = {
+  id: string;
+  text: string;
+};
+
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
+  const [answerBubbles, setAnswerBubbles] = useState<Record<string, AnswerBubble>>({});
   const [labelAnswers, setLabelAnswers] = useState<Answer[]>([]);
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null);
   const [answerText, setAnswerText] = useState("");
@@ -137,34 +165,57 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setScores(nextScores);
       setQuestionResults(nextResults);
 
+      const nextAnswers = await getAnswersForQuestionRound({
+        gameSessionId: targetGameSession.id,
+        questionIndex: targetGameSession.currentQuestionIndex,
+        revealRound: targetGameSession.currentRevealRound,
+      });
+      setAnswers(nextAnswers);
+
       if (isPresenter) {
-        const [nextAnswers, nextLabelAnswers] = await Promise.all([
-          getAnswersForQuestionRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-          }),
-          getAnswersForQuestion({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-          }),
-        ]);
-        setAnswers(nextAnswers);
+        const nextLabelAnswers = await getAnswersForQuestion({
+          gameSessionId: targetGameSession.id,
+          questionIndex: targetGameSession.currentQuestionIndex,
+        });
         setLabelAnswers(nextLabelAnswers);
       } else {
-        setLabelAnswers([]);
         const nextMyAnswer = await getAnswerForPlayerRound({
           gameSessionId: targetGameSession.id,
           questionIndex: targetGameSession.currentQuestionIndex,
           revealRound: targetGameSession.currentRevealRound,
           playerId,
         });
+        setLabelAnswers([]);
         setMyAnswer(nextMyAnswer);
         setAnswerText(nextMyAnswer?.answerText ?? "");
       }
     },
     [isPresenter, playerId],
   );
+
+  const showAnswerBubble = useCallback((answer: Answer) => {
+    const bubbleId = `${answer.id}:${answer.submittedAt}`;
+
+    setAnswerBubbles((currentBubbles) => ({
+      ...currentBubbles,
+      [answer.playerId]: {
+        id: bubbleId,
+        text: answer.answerText,
+      },
+    }));
+
+    window.setTimeout(() => {
+      setAnswerBubbles((currentBubbles) => {
+        if (currentBubbles[answer.playerId]?.id !== bubbleId) {
+          return currentBubbles;
+        }
+
+        const nextBubbles = { ...currentBubbles };
+        delete nextBubbles[answer.playerId];
+        return nextBubbles;
+      });
+    }, 3200);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -285,46 +336,46 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         },
       );
 
-    if (isPresenter) {
-      channel.on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "answers",
-          filter: `game_session_id=eq.${room.currentGameId}`,
-        },
-        () => {
-          if (!gameSession) {
-            return;
-          }
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "answers",
+        filter: `game_session_id=eq.${room.currentGameId}`,
+      },
+      (payload) => {
+        if (!gameSession) {
+          return;
+        }
 
-          Promise.all([
-            getAnswersForQuestionRound({
-              gameSessionId: gameSession.id,
-              questionIndex: gameSession.currentQuestionIndex,
-              revealRound: gameSession.currentRevealRound,
-            }),
-            getAnswersForQuestion({
-              gameSessionId: gameSession.id,
-              questionIndex: gameSession.currentQuestionIndex,
-            }),
-          ])
-            .then(([nextAnswers, nextLabelAnswers]) => {
-              setAnswers(nextAnswers);
-              setLabelAnswers(nextLabelAnswers);
-            })
-            .catch((error) => onError(error instanceof Error ? error.message : "刷新答案失败。"));
-        },
-      );
-    }
+        if (payload.eventType !== "DELETE") {
+          const changedAnswer = toAnswer(payload.new as DbAnswer);
+          const isCurrentRoundAnswer =
+            changedAnswer.questionIndex === gameSession.currentQuestionIndex &&
+            changedAnswer.revealRound === gameSession.currentRevealRound;
+
+          if (isPresenter && isCurrentRoundAnswer) {
+            showAnswerBubble(changedAnswer);
+          }
+        }
+
+        refreshRoundData(gameSession).catch((error) => {
+          onError(error instanceof Error ? error.message : "刷新答案失败。");
+        });
+      },
+    );
 
     channel.subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [gameSession, isPresenter, onError, refreshRoundData, room.currentGameId]);
+  }, [gameSession, isPresenter, onError, refreshRoundData, room.currentGameId, showAnswerBubble]);
+
+  useEffect(() => {
+    setAnswerBubbles({});
+  }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -670,17 +721,36 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-        {scoreRows.map(({ player, score, correctCount }, index) => (
-          <div className="rounded-md bg-slate-50 px-3 py-2 text-sm" key={player.id}>
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0 font-semibold text-slate-950">
-                #{index + 1} {player.nickname}
+        {scoreRows.map(({ player, score, correctCount }, index) => {
+          const alreadyCorrect = correctPlayerSet.has(player.id);
+          const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
+          const answerBubble = answerBubbles[player.id];
+
+          return (
+            <div className="relative rounded-md bg-slate-50 px-3 py-2 text-sm" key={player.id}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 font-semibold text-slate-950">
+                  #{index + 1} {player.nickname}
+                </div>
+                <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
               </div>
-              <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                <span>答对 {correctCount} 题</span>
+                {!isPresenter && alreadyCorrect ? (
+                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                ) : null}
+                {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
+                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
+                ) : null}
+              </div>
+              {isPresenter && answerBubble ? (
+                <div className="pointer-events-none absolute left-3 right-3 top-full z-20 mt-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-950 shadow-lg lg:left-[calc(100%+0.5rem)] lg:right-auto lg:top-1/2 lg:mt-0 lg:w-56 lg:-translate-y-1/2">
+                  <span className="block truncate">{answerBubble.text}</span>
+                </div>
+              ) : null}
             </div>
-            <div className="mt-1 text-[var(--muted)]">答对 {correctCount} 题</div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
