@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "@/components/Button";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -117,7 +118,6 @@ type AnswerBubble = {
   left: number;
   top: number;
   width: number;
-  placement: "below" | "side";
 };
 
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
@@ -150,6 +150,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
+  const [canRenderPortal, setCanRenderPortal] = useState(false);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const getPlayerName = useCallback(
@@ -202,10 +203,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     const bubbleId = `${answer.id}:${answer.submittedAt}`;
     const anchor = scoreRowRefs.current[answer.playerId];
     const rect = anchor?.getBoundingClientRect();
-    const placement = rect && window.innerWidth >= 1024 ? "side" : "below";
-    const left = rect ? (placement === "side" ? rect.right + 8 : rect.left + 12) : 16;
-    const top = rect ? (placement === "side" ? rect.top + rect.height / 2 : rect.bottom + 8) : 16;
-    const width = rect ? (placement === "side" ? 224 : Math.max(160, rect.width - 24)) : 224;
+    const width = 224;
+    const left = rect ? Math.min(rect.right + 8, window.innerWidth - width - 12) : 16;
+    const top = rect ? Math.max(12, rect.top + rect.height / 2) : 16;
 
     setAnswerBubbles((currentBubbles) => ({
       ...currentBubbles,
@@ -215,7 +215,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         left,
         top,
         width,
-        placement,
       },
     }));
 
@@ -230,6 +229,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         return nextBubbles;
       });
     }, 3200);
+  }, []);
+
+  useEffect(() => {
+    setCanRenderPortal(true);
   }, []);
 
   useEffect(() => {
@@ -989,8 +992,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         {actionPanel}
       </div>
 
-      {isPresenter
-        ? Object.values(answerBubbles).map((answerBubble) => (
+      {isPresenter && canRenderPortal
+        ? createPortal(
+            Object.values(answerBubbles).map((answerBubble) => (
             <div
               className="pointer-events-none fixed z-40 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-950 shadow-lg"
               key={answerBubble.id}
@@ -998,12 +1002,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 left: answerBubble.left,
                 top: answerBubble.top,
                 width: answerBubble.width,
-                transform: answerBubble.placement === "side" ? "translateY(-50%)" : undefined,
+                transform: "translateY(-50%)",
               }}
             >
               <span className="block truncate">{answerBubble.text}</span>
             </div>
-          ))
+            )),
+            document.body,
+          )
         : null}
 
       {isLabelModalOpen && canAddQuestionLabel ? (
