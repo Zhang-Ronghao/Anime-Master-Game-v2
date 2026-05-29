@@ -26,7 +26,7 @@ import {
   selectPresenterForRound,
   startGameWithQuestionSet,
 } from "@/lib/supabaseRooms";
-import type { DbRoom, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
+import type { DbRoom, GameMode, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -36,9 +36,16 @@ const statusText: Record<RoomStatus, string> = {
 };
 
 type GameSettings = {
+  gameMode: GameMode;
   maxRevealRounds: number;
   roundSeconds: number;
   roundScores: number[];
+};
+
+const gameModeText: Record<GameMode, string> = {
+  ROUND_REVEAL: "轮揭竞答模式",
+  BUZZER_FIRST_CORRECT: "抢答模式 - 首答制",
+  BUZZER_RANKED: "抢答模式 - 排名得分制",
 };
 
 function applyRoomMeta(currentRoom: Room | null, dbRoom: DbRoom): Room | null {
@@ -129,6 +136,8 @@ function GameSettingsPanel({
   canEdit: boolean;
   onChange: (settings: GameSettings) => void;
 }) {
+  const isRoundRevealMode = settings.gameMode === "ROUND_REVEAL";
+
   function updateRounds(nextRounds: number) {
     onChange({
       ...settings,
@@ -152,6 +161,21 @@ function GameSettingsPanel({
       <p className="text-sm leading-6 text-[var(--muted)]">
         这里设置每张图片的揭露轮数、每轮倒计时和每轮答对分数。设置会在房主点击“开始游戏”时写入本局游戏。
       </p>
+      <label className="mt-4 block">
+        <span className="mb-2 block text-sm font-medium text-slate-900">游戏模式</span>
+        <select
+          className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+          disabled={!canEdit}
+          value={settings.gameMode}
+          onChange={(event) => onChange({ ...settings, gameMode: event.target.value as GameMode })}
+        >
+          {Object.entries(gameModeText).map(([mode, text]) => (
+            <option key={mode} value={mode}>
+              {text}
+            </option>
+          ))}
+        </select>
+      </label>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block">
           <span className="mb-2 block text-sm font-medium text-slate-900">揭露轮数</span>
@@ -180,6 +204,7 @@ function GameSettingsPanel({
           />
         </label>
       </div>
+      {isRoundRevealMode ? (
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         {Array.from({ length: settings.maxRevealRounds }, (_, index) => (
           <label className="block" key={index}>
@@ -195,6 +220,13 @@ function GameSettingsPanel({
           </label>
         ))}
       </div>
+      ) : (
+        <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+          {settings.gameMode === "BUZZER_FIRST_CORRECT"
+            ? "首答制：每轮每人 1 次抢答机会，第一个答对者 +1 分并结束本题。"
+            : "排名得分制：每轮每人 1 次抢答机会，按本题答对顺序计分：第 1 名 +N，第 2 名 +N-1，依次递减，最低 +1。"}
+        </div>
+      )}
       {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前阶段你只能查看设置，不能修改。</p> : null}
     </Panel>
   );
@@ -478,6 +510,7 @@ export default function RoomPage() {
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
+    gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
     roundSeconds: 60,
     roundScores: [3, 2, 1],
@@ -778,6 +811,7 @@ export default function RoomPage() {
         hostPlayerId: playerId,
         presenterPlayerId: room.currentPresenterPlayerId,
         questionSetId: room.preparedQuestionSetId,
+        gameMode: gameSettings.gameMode,
         maxRevealRounds: gameSettings.maxRevealRounds,
         roundSeconds: gameSettings.roundSeconds,
         roundScores: gameSettings.roundScores,

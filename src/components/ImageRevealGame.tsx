@@ -11,18 +11,26 @@ import {
   getAnswersForQuestion,
   getAnswerForPlayerRound,
   getAnswersForQuestionRound,
+  getBuzzerAnswerForPlayerRound,
+  getBuzzerAnswersForQuestion,
+  getBuzzerAnswersForQuestionRound,
   getGameSessionById,
   getPlayerScores,
   getQuestionResultsForQuestion,
   getQuestionsByQuestionSetId,
   gradeAnswersAndAdvance,
+  judgeBuzzerAnswer,
+  settleBuzzerRound,
   skipCurrentQuestion,
   submitAnswer,
+  submitBuzzerAnswer,
   updateQuestionLabel,
 } from "@/lib/supabaseRooms";
 import type {
   Answer,
+  BuzzerAnswer,
   DbAnswer,
+  DbBuzzerAnswer,
   DbGameSession,
   DbQuestion,
   GameSession,
@@ -56,6 +64,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     questionSetId: gameSession.question_set_id,
     presenterPlayerId: gameSession.presenter_player_id,
     status: gameSession.status,
+    gameMode: gameSession.game_mode ?? "ROUND_REVEAL",
     currentQuestionIndex: gameSession.current_question_index,
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks: Array.isArray(gameSession.revealed_blocks)
@@ -112,6 +121,22 @@ function toAnswer(answer: DbAnswer): Answer {
   };
 }
 
+function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
+  return {
+    id: answer.id,
+    gameSessionId: answer.game_session_id,
+    questionIndex: answer.question_index,
+    revealRound: answer.reveal_round,
+    playerId: answer.player_id,
+    answerText: answer.answer_text,
+    status: answer.status,
+    scoreAwarded: answer.score_awarded,
+    submittedAt: answer.submitted_at,
+    judgedAt: answer.judged_at,
+    judgedByPlayerId: answer.judged_by_player_id,
+  };
+}
+
 type AnswerBubble = {
   id: string;
   text: string;
@@ -126,6 +151,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [answerBubbles, setAnswerBubbles] = useState<Record<string, AnswerBubble>>({});
+  const [buzzerAnswers, setBuzzerAnswers] = useState<BuzzerAnswer[]>([]);
+  const [myBuzzerAnswer, setMyBuzzerAnswer] = useState<BuzzerAnswer | null>(null);
   const [labelAnswers, setLabelAnswers] = useState<Answer[]>([]);
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null);
   const [answerText, setAnswerText] = useState("");
@@ -138,6 +165,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [isGrading, setIsGrading] = useState(false);
+  const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
+  const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
@@ -171,29 +200,70 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setScores(nextScores);
       setQuestionResults(nextResults);
 
-      const nextAnswers = await getAnswersForQuestionRound({
-        gameSessionId: targetGameSession.id,
-        questionIndex: targetGameSession.currentQuestionIndex,
-        revealRound: targetGameSession.currentRevealRound,
-      });
-      setAnswers(nextAnswers);
-
-      if (isPresenter) {
-        const nextLabelAnswers = await getAnswersForQuestion({
-          gameSessionId: targetGameSession.id,
-          questionIndex: targetGameSession.currentQuestionIndex,
-        });
-        setLabelAnswers(nextLabelAnswers);
-      } else {
-        const nextMyAnswer = await getAnswerForPlayerRound({
+      if (targetGameSession.gameMode === "ROUND_REVEAL") {
+        const nextAnswers = await getAnswersForQuestionRound({
           gameSessionId: targetGameSession.id,
           questionIndex: targetGameSession.currentQuestionIndex,
           revealRound: targetGameSession.currentRevealRound,
-          playerId,
         });
-        setLabelAnswers([]);
-        setMyAnswer(nextMyAnswer);
-        setAnswerText(nextMyAnswer?.answerText ?? "");
+        setAnswers(nextAnswers);
+        setBuzzerAnswers([]);
+        setMyBuzzerAnswer(null);
+
+        if (isPresenter) {
+          const nextLabelAnswers = await getAnswersForQuestion({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+          });
+          setLabelAnswers(nextLabelAnswers);
+        } else {
+          const nextMyAnswer = await getAnswerForPlayerRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+            playerId,
+          });
+          setLabelAnswers([]);
+          setMyAnswer(nextMyAnswer);
+          setAnswerText(nextMyAnswer?.answerText ?? "");
+        }
+      } else {
+        const [nextBuzzerAnswers, nextLabelAnswers] = await Promise.all([
+          getBuzzerAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+          getBuzzerAnswersForQuestion({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+          }),
+        ]);
+        setAnswers([]);
+        setBuzzerAnswers(nextBuzzerAnswers);
+        setLabelAnswers(
+          nextLabelAnswers.map((answer) => ({
+            id: answer.id,
+            gameSessionId: answer.gameSessionId,
+            questionIndex: answer.questionIndex,
+            revealRound: answer.revealRound,
+            playerId: answer.playerId,
+            answerText: answer.answerText,
+            submittedAt: answer.submittedAt,
+          })),
+        );
+
+        if (!isPresenter) {
+          const nextMyBuzzerAnswer = await getBuzzerAnswerForPlayerRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+            playerId,
+          });
+          setMyBuzzerAnswer(nextMyBuzzerAnswer);
+          setAnswerText(nextMyBuzzerAnswer?.answerText ?? "");
+        }
+        setMyAnswer(null);
       }
     },
     [isPresenter, playerId],
@@ -384,6 +454,44 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       },
     );
 
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "buzzer_answers",
+        filter: `game_session_id=eq.${room.currentGameId}`,
+      },
+      (payload) => {
+        if (!gameSession) {
+          return;
+        }
+
+        if (payload.eventType !== "DELETE") {
+          const changedAnswer = toBuzzerAnswer(payload.new as DbBuzzerAnswer);
+          const isCurrentRoundAnswer =
+            changedAnswer.questionIndex === gameSession.currentQuestionIndex &&
+            changedAnswer.revealRound === gameSession.currentRevealRound;
+
+          if (isPresenter && isCurrentRoundAnswer) {
+            showAnswerBubble({
+              id: changedAnswer.id,
+              gameSessionId: changedAnswer.gameSessionId,
+              questionIndex: changedAnswer.questionIndex,
+              revealRound: changedAnswer.revealRound,
+              playerId: changedAnswer.playerId,
+              answerText: changedAnswer.answerText,
+              submittedAt: changedAnswer.submittedAt,
+            });
+          }
+        }
+
+        refreshRoundData(gameSession).catch((error) => {
+          onError(error instanceof Error ? error.message : "刷新抢答队列失败。");
+        });
+      },
+    );
+
     channel.subscribe();
 
     return () => {
@@ -413,6 +521,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
   const currentScore = gameSession?.roundScores[Math.min(maxRevealRounds, currentRound) - 1] ?? 1;
+  const isBuzzerMode = gameSession?.gameMode !== "ROUND_REVEAL";
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
@@ -423,6 +532,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
   const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
+  const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
+  const pendingBuzzerAnswers = buzzerAnswers.filter((answer) => answer.status === "pending");
+  const currentBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
+  const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
+  const allActiveGuessersUsedBuzzerChance =
+    activeGuessers.length > 0 && activeGuessers.every((player) => buzzerAnswerPlayerSet.has(player.id));
   const allActiveGuessersSubmitted =
     activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
   const scoreRows = room.players
@@ -442,8 +557,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
-    !isPresenter && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
-  const canGrade = isPresenter && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
+    !isPresenter && !isBuzzerMode && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
+  const canSubmitBuzzerAnswer =
+    !isPresenter &&
+    isBuzzerMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    !myBuzzerAnswer &&
+    isRoundActive &&
+    answerText.trim().length > 0;
+  const canGrade = isPresenter && !isBuzzerMode && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
+  const canJudgeBuzzer = isPresenter && isBuzzerMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
+  const canSettleBuzzerRound =
+    isPresenter &&
+    isBuzzerMode &&
+    !isQuestionReviewing &&
+    isRoundEnded &&
+    pendingBuzzerAnswers.length === 0 &&
+    Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
 
   useEffect(() => {
@@ -603,6 +734,72 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function handleSubmitBuzzerAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSubmittingAnswer(true);
+    try {
+      const submitted = await submitBuzzerAnswer({
+        gameSessionId: gameSession.id,
+        playerId,
+        answerText,
+      });
+      setMyBuzzerAnswer(submitted);
+      setAnswerText(submitted.answerText);
+      await refreshRoundData(gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提交抢答失败。");
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  }
+
+  async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
+    if (!gameSession || !currentBuzzerAnswer) {
+      return;
+    }
+
+    setIsJudgingBuzzer(true);
+    try {
+      const judged = await judgeBuzzerAnswer({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        buzzerAnswerId: currentBuzzerAnswer.id,
+        isCorrect,
+      });
+      setGameSession(judged.gameSession);
+      setRemainingSeconds(getRemainingSeconds(judged.gameSession.roundStartedAt, judged.gameSession.roundSeconds));
+      await refreshRoundData(judged.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "判定抢答失败。");
+    } finally {
+      setIsJudgingBuzzer(false);
+    }
+  }
+
+  async function handleSettleBuzzerRound() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSettlingBuzzerRound(true);
+    try {
+      const settled = await settleBuzzerRound({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+      });
+      setGameSession(settled.gameSession);
+      setRemainingSeconds(getRemainingSeconds(settled.gameSession.roundStartedAt, settled.gameSession.roundSeconds));
+      await refreshRoundData(settled.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "结算抢答轮次失败。");
+    } finally {
+      setIsSettlingBuzzerRound(false);
+    }
+  }
+
   async function handleGradeAnswers() {
     if (!gameSession) {
       return;
@@ -742,6 +939,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         {scoreRows.map(({ player, score, correctCount }, index) => {
           const alreadyCorrect = correctPlayerSet.has(player.id);
           const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
+          const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
           return (
             <div
               className="rounded-md bg-slate-50 px-3 py-2 text-sm"
@@ -763,6 +961,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 ) : null}
                 {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
                   <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
+                ) : null}
+                {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
+                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                    {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
+                  </span>
+                ) : null}
+                {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
+                  <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
+                ) : null}
+                {isBuzzerMode && alreadyCorrect ? (
+                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
                 ) : null}
               </div>
             </div>
@@ -895,13 +1104,48 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <p className="mt-1 text-sm text-[var(--muted)]">
             已揭露 {revealedBlockSet.size} / {TOTAL_BLOCKS} 块，本轮已选择 {selectedBlocks.length} 块。
           </p>
+          {isBuzzerMode ? (
+            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="font-semibold text-slate-950">抢答队列</p>
+              {currentBuzzerAnswer ? (
+                <div className="mt-2 rounded-md bg-slate-50 p-3">
+                  <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
+                  <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
+                      答对
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => handleJudgeBuzzerAnswer(false)}
+                      disabled={!canJudgeBuzzer || isJudgingBuzzer}
+                    >
+                      答错
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-[var(--muted)]">{hasRoundStarted ? "当前没有待判定抢答。" : "揭露后开始抢答。"}</p>
+              )}
+              <p className="mt-2 text-xs text-[var(--muted)]">
+                已排队 {pendingBuzzerAnswers.length} 人，本轮已用机会 {buzzerAnswers.length} / {activeGuessers.length}。
+              </p>
+            </div>
+          ) : null}
           <div className="mt-3 grid gap-2">
             <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
               {isConfirmingReveal ? "确认中..." : "确认揭露"}
             </Button>
-            <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
-              判分
-            </Button>
+            {isBuzzerMode ? (
+              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
+                {isSettlingBuzzerRound ? "结算中..." : "结算本轮抢答"}
+              </Button>
+            ) : (
+              <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
+                判分
+              </Button>
+            )}
             <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
               {isSkippingQuestion ? "跳过中..." : "跳过本题"}
             </Button>
@@ -926,18 +1170,29 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
                 <input
                   className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  disabled={!isRoundActive}
+                  disabled={!isRoundActive || (isBuzzerMode && Boolean(myBuzzerAnswer))}
                   maxLength={80}
                   placeholder="输入动画名称"
                   value={answerText}
                   onChange={(event) => setAnswerText(event.target.value)}
                 />
               </label>
-              <Button className="w-full" type="button" onClick={handleSubmitAnswer} disabled={!canSubmitAnswer || isSubmittingAnswer}>
-                {isSubmittingAnswer ? "提交中..." : myAnswer ? "修改答案" : "提交答案"}
+              <Button
+                className="w-full"
+                type="button"
+                onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
+                disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
+              >
+                {isSubmittingAnswer ? "提交中..." : isBuzzerMode ? "提交抢答" : myAnswer ? "修改答案" : "提交答案"}
               </Button>
               <p className="text-sm text-[var(--muted)]">
-                {myAnswer ? `已提交：${myAnswer.answerText}` : "本轮尚未提交答案"}
+                {isBuzzerMode
+                  ? myBuzzerAnswer
+                    ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                    : "本轮尚未抢答"
+                  : myAnswer
+                    ? `已提交：${myAnswer.answerText}`
+                    : "本轮尚未提交答案"}
                 {isRoundEnded ? "，本轮已结束" : ""}
               </p>
             </div>

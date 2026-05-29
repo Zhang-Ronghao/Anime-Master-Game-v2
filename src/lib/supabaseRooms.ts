@@ -4,7 +4,9 @@ import { createRoomCode } from "@/lib/id";
 import { assertSupabaseEnv, getSupabasePublicConfig, supabase } from "@/lib/supabaseClient";
 import type {
   Answer,
+  BuzzerAnswer,
   DbAnswer,
+  DbBuzzerAnswer,
   DbGameSession,
   DbPlayer,
   DbPlayerScore,
@@ -13,6 +15,7 @@ import type {
   DbQuestionSet,
   DbRoom,
   GameSession,
+  GameMode,
   LeaderboardEntry,
   Player,
   PlayerScore,
@@ -107,6 +110,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     questionSetId: gameSession.question_set_id,
     presenterPlayerId: gameSession.presenter_player_id,
     status: gameSession.status,
+    gameMode: gameSession.game_mode ?? "ROUND_REVEAL",
     currentQuestionIndex: gameSession.current_question_index,
     currentRevealRound: gameSession.current_reveal_round,
     revealedBlocks,
@@ -116,6 +120,22 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     roundStartedAt: gameSession.round_started_at,
     createdAt: gameSession.created_at,
     endedAt: gameSession.ended_at,
+  };
+}
+
+function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
+  return {
+    id: answer.id,
+    gameSessionId: answer.game_session_id,
+    questionIndex: answer.question_index,
+    revealRound: answer.reveal_round,
+    playerId: answer.player_id,
+    answerText: answer.answer_text,
+    status: answer.status,
+    scoreAwarded: answer.score_awarded,
+    submittedAt: answer.submitted_at,
+    judgedAt: answer.judged_at,
+    judgedByPlayerId: answer.judged_by_player_id,
   };
 }
 
@@ -755,6 +775,7 @@ export async function startGameWithQuestionSet(params: {
   hostPlayerId: string;
   presenterPlayerId: string;
   questionSetId: string;
+  gameMode?: GameMode;
   maxRevealRounds?: number;
   roundSeconds?: number;
   roundScores?: number[];
@@ -799,6 +820,7 @@ export async function startGameWithQuestionSet(params: {
 
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
   const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 60)));
+  const gameMode = params.gameMode ?? "ROUND_REVEAL";
   const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
     const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
     return Math.max(0, Math.floor(score));
@@ -811,6 +833,7 @@ export async function startGameWithQuestionSet(params: {
       question_set_id: params.questionSetId,
       presenter_player_id: params.presenterPlayerId,
       status: "PLAYING",
+      game_mode: gameMode,
       max_reveal_rounds: maxRevealRounds,
       round_seconds: roundSeconds,
       round_scores: roundScores,
@@ -1038,6 +1061,74 @@ export async function getAnswerForPlayerRound(params: {
   return data ? toAnswer(data) : null;
 }
 
+export async function getBuzzerAnswersForQuestionRound(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .eq("reveal_round", params.revealRound)
+    .order("submitted_at", { ascending: true })
+    .returns<DbBuzzerAnswer[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toBuzzerAnswer);
+}
+
+export async function getBuzzerAnswersForQuestion(params: {
+  gameSessionId: string;
+  questionIndex: number;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .order("submitted_at", { ascending: true })
+    .returns<DbBuzzerAnswer[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toBuzzerAnswer);
+}
+
+export async function getBuzzerAnswerForPlayerRound(params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+}) {
+  assertSupabaseEnv();
+
+  const { data, error } = await supabase
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("question_index", params.questionIndex)
+    .eq("reveal_round", params.revealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbBuzzerAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data ? toBuzzerAnswer(data) : null;
+}
+
 export async function getPlayerScores(gameSessionId: string) {
   assertSupabaseEnv();
 
@@ -1228,6 +1319,154 @@ export async function getQuestionResultsForQuestion(params: {
   return (data ?? []).map(toQuestionResult);
 }
 
+async function addScoreToPlayer(params: {
+  gameSessionId: string;
+  playerId: string;
+  scoreAwarded: number;
+}) {
+  const { data: existingScore, error: scoreLoadError } = await supabase
+    .from("player_scores")
+    .select("*")
+    .eq("game_session_id", params.gameSessionId)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbPlayerScore>();
+
+  if (scoreLoadError) {
+    throw new Error(scoreLoadError.message);
+  }
+
+  const { error: scoreError } = await supabase.from("player_scores").upsert(
+    {
+      id: existingScore?.id,
+      game_session_id: params.gameSessionId,
+      player_id: params.playerId,
+      score: (existingScore?.score ?? 0) + params.scoreAwarded,
+      correct_count: (existingScore?.correct_count ?? 0) + 1,
+    },
+    {
+      onConflict: "game_session_id,player_id",
+    },
+  );
+
+  if (scoreError) {
+    throw new Error(scoreError.message);
+  }
+}
+
+async function revealQuestionForReview(gameSessionId: string) {
+  const { data: reviewedGameSession, error } = await supabase
+    .from("game_sessions")
+    .update({
+      revealed_blocks: ALL_REVEALED_BLOCKS,
+      round_started_at: null,
+    })
+    .eq("id", gameSessionId)
+    .select()
+    .single<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toGameSession(reviewedGameSession);
+}
+
+async function moveToNextRevealRound(currentGameSession: DbGameSession) {
+  const { data: updatedGameSession, error } = await supabase
+    .from("game_sessions")
+    .update({
+      current_reveal_round: currentGameSession.current_reveal_round + 1,
+      round_started_at: null,
+    })
+    .eq("id", currentGameSession.id)
+    .select()
+    .single<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toGameSession(updatedGameSession);
+}
+
+async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
+  const currentSession = toGameSession(currentGameSession);
+  const questionIndex = currentGameSession.current_question_index;
+  const currentRound = currentGameSession.current_reveal_round;
+  const roundStartedAt = currentGameSession.round_started_at;
+  const roundEnded = Boolean(
+    roundStartedAt && Date.now() - new Date(roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
+  );
+
+  const [{ data: players, error: playersError }, { data: questionResults, error: resultsError }, { data: currentRoundAnswers, error: answersError }] =
+    await Promise.all([
+      supabase.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
+      supabase
+        .from("question_results")
+        .select("*")
+        .eq("game_session_id", currentGameSession.id)
+        .eq("question_index", questionIndex)
+        .returns<DbQuestionResult[]>(),
+      supabase
+        .from("buzzer_answers")
+        .select("*")
+        .eq("game_session_id", currentGameSession.id)
+        .eq("question_index", questionIndex)
+        .eq("reveal_round", currentRound)
+        .returns<DbBuzzerAnswer[]>(),
+    ]);
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  if (resultsError) {
+    throw new Error(resultsError.message);
+  }
+
+  if (answersError) {
+    throw new Error(answersError.message);
+  }
+
+  const guesserIds = (players ?? [])
+    .filter((player) => player.id !== currentGameSession.presenter_player_id)
+    .map((player) => player.id);
+  const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
+  const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
+  const answerByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const hasPendingAnswers = (currentRoundAnswers ?? []).some((answer) => answer.status === "pending");
+  const allEligiblePlayersUsedChance =
+    eligibleGuesserIds.length === 0 || eligibleGuesserIds.every((guesserId) => answerByPlayerId.has(guesserId));
+  const hasCorrectAnswer = correctSet.size > 0;
+  const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+
+  if (allPlayersCorrect || currentSession.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrectAnswer) {
+    return revealQuestionForReview(currentGameSession.id);
+  }
+
+  if (hasPendingAnswers) {
+    return currentSession;
+  }
+
+  if (hasCorrectAnswer && (roundEnded || allEligiblePlayersUsedChance)) {
+    return revealQuestionForReview(currentGameSession.id);
+  }
+
+  if (!hasCorrectAnswer && allEligiblePlayersUsedChance) {
+    if (currentRound >= currentSession.maxRevealRounds) {
+      return revealQuestionForReview(currentGameSession.id);
+    }
+
+    return moveToNextRevealRound(currentGameSession);
+  }
+
+  if (!hasCorrectAnswer && roundEnded && currentRound >= currentSession.maxRevealRounds) {
+    return revealQuestionForReview(currentGameSession.id);
+  }
+
+  return currentSession;
+}
+
 export async function submitAnswer(params: {
   gameSessionId: string;
   playerId: string;
@@ -1242,6 +1481,10 @@ export async function submitAnswer(params: {
   }
 
   const gameSession = await getGameSessionById(params.gameSessionId);
+
+  if (gameSession?.gameMode !== "ROUND_REVEAL") {
+    throw new Error("当前游戏是抢答模式，请使用抢答提交。");
+  }
 
   if (!gameSession || gameSession.status !== "PLAYING") {
     throw new Error("当前游戏不在答题阶段。");
@@ -1298,6 +1541,250 @@ export async function submitAnswer(params: {
   }
 
   return toAnswer(data);
+}
+
+export async function submitBuzzerAnswer(params: {
+  gameSessionId: string;
+  playerId: string;
+  answerText: string;
+}) {
+  assertSupabaseEnv();
+
+  const answerText = params.answerText.trim();
+
+  if (!answerText) {
+    throw new Error("请输入答案。");
+  }
+
+  const gameSession = await getGameSessionById(params.gameSessionId);
+
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode === "ROUND_REVEAL") {
+    throw new Error("当前游戏不在抢答阶段。");
+  }
+
+  if (gameSession.presenterPlayerId === params.playerId) {
+    throw new Error("出题人不能抢答。");
+  }
+
+  if (!gameSession.roundStartedAt) {
+    throw new Error("等待出题人确认揭露后才能抢答。");
+  }
+
+  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+    throw new Error("本轮抢答时间已结束。");
+  }
+
+  const { data: existingResult, error: resultError } = await supabase
+    .from("question_results")
+    .select("id")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("player_id", params.playerId)
+    .maybeSingle<{ id: string }>();
+
+  if (resultError) {
+    throw new Error(resultError.message);
+  }
+
+  if (existingResult) {
+    throw new Error("你已答对本题，不能继续抢答。");
+  }
+
+  const { data, error } = await supabase
+    .from("buzzer_answers")
+    .insert({
+      game_session_id: gameSession.id,
+      question_index: gameSession.currentQuestionIndex,
+      reveal_round: gameSession.currentRevealRound,
+      player_id: params.playerId,
+      answer_text: answerText,
+      submitted_at: new Date().toISOString(),
+    })
+    .select()
+    .single<DbBuzzerAnswer>();
+
+  if (error) {
+    if (isUniqueViolation(error)) {
+      throw new Error("本轮你已经用过抢答机会。");
+    }
+
+    throw new Error(error.message);
+  }
+
+  return toBuzzerAnswer(data);
+}
+
+export async function judgeBuzzerAnswer(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  buzzerAnswerId: string;
+  isCorrect: boolean;
+}) {
+  assertSupabaseEnv();
+
+  const { data: currentGameSession, error: currentError } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("只有当前出题人可以判定抢答。");
+  }
+
+  const currentSession = toGameSession(currentGameSession);
+
+  if (currentSession.gameMode === "ROUND_REVEAL") {
+    throw new Error("当前游戏不是抢答模式。");
+  }
+
+  const { data: firstPendingAnswer, error: pendingError } = await supabase
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", currentGameSession.id)
+    .eq("question_index", currentGameSession.current_question_index)
+    .eq("reveal_round", currentGameSession.current_reveal_round)
+    .eq("status", "pending")
+    .order("submitted_at", { ascending: true })
+    .limit(1)
+    .maybeSingle<DbBuzzerAnswer>();
+
+  if (pendingError) {
+    throw new Error(pendingError.message);
+  }
+
+  if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
+    throw new Error("请按抢答队列顺序判定。");
+  }
+
+  let scoreAwarded = 0;
+
+  if (params.isCorrect) {
+    if (currentSession.gameMode === "BUZZER_FIRST_CORRECT") {
+      scoreAwarded = 1;
+    } else {
+      const [{ data: players, error: playersError }, { data: existingResults, error: resultsError }] = await Promise.all([
+        supabase.from("players").select("id").eq("room_id", currentGameSession.room_id).returns<{ id: string }[]>(),
+        supabase
+          .from("question_results")
+          .select("id")
+          .eq("game_session_id", currentGameSession.id)
+          .eq("question_index", currentGameSession.current_question_index)
+          .returns<{ id: string }[]>(),
+      ]);
+
+      if (playersError) {
+        throw new Error(playersError.message);
+      }
+
+      if (resultsError) {
+        throw new Error(resultsError.message);
+      }
+
+      const guesserCount = (players ?? []).filter((player) => player.id !== currentGameSession.presenter_player_id).length;
+      const correctRank = (existingResults?.length ?? 0) + 1;
+      scoreAwarded = Math.max(1, guesserCount - correctRank + 1);
+    }
+
+    const { error: resultError } = await supabase.from("question_results").insert({
+      game_session_id: currentGameSession.id,
+      question_index: currentGameSession.current_question_index,
+      player_id: firstPendingAnswer.player_id,
+      scored_round: currentGameSession.current_reveal_round,
+      score_awarded: scoreAwarded,
+      judged_by_player_id: params.presenterPlayerId,
+    });
+
+    if (resultError && !isUniqueViolation(resultError)) {
+      throw new Error(resultError.message);
+    }
+
+    if (!resultError) {
+      await addScoreToPlayer({
+        gameSessionId: currentGameSession.id,
+        playerId: firstPendingAnswer.player_id,
+        scoreAwarded,
+      });
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from("buzzer_answers")
+    .update({
+      status: params.isCorrect ? "correct" : "wrong",
+      score_awarded: scoreAwarded,
+      judged_at: new Date().toISOString(),
+      judged_by_player_id: params.presenterPlayerId,
+    })
+    .eq("id", firstPendingAnswer.id)
+    .eq("status", "pending");
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
+
+  return {
+    gameSession: nextGameSession,
+    judgedAnswer: {
+      ...toBuzzerAnswer(firstPendingAnswer),
+      status: params.isCorrect ? "correct" as const : "wrong" as const,
+      scoreAwarded,
+      judgedAt: new Date().toISOString(),
+      judgedByPlayerId: params.presenterPlayerId,
+    },
+  };
+}
+
+export async function settleBuzzerRound(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+}) {
+  assertSupabaseEnv();
+
+  const { data: currentGameSession, error } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("只有当前出题人可以结算抢答轮次。");
+  }
+
+  const currentSession = toGameSession(currentGameSession);
+
+  if (currentSession.gameMode === "ROUND_REVEAL") {
+    throw new Error("当前游戏不是抢答模式。");
+  }
+
+  const roundEnded = Boolean(
+    currentSession.roundStartedAt &&
+      Date.now() - new Date(currentSession.roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
+  );
+
+  if (!roundEnded) {
+    throw new Error("本轮抢答时间结束后才能结算。");
+  }
+
+  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
+
+  return {
+    gameSession: nextGameSession,
+  };
 }
 
 export async function gradeAnswersAndAdvance(params: {
@@ -1659,11 +2146,27 @@ export async function updateQuestionLabel(params: {
       throw new Error(answerError.message);
     }
 
-    if (!answer) {
-      throw new Error("没有找到这个玩家回答。");
-    }
+    if (answer) {
+      sourceAnswerId = answer.id;
+    } else {
+      const { data: buzzerAnswer, error: buzzerAnswerError } = await supabase
+        .from("buzzer_answers")
+        .select("*")
+        .eq("id", params.answerId)
+        .eq("game_session_id", currentGameSession.id)
+        .eq("question_index", currentGameSession.current_question_index)
+        .maybeSingle<DbBuzzerAnswer>();
 
-    sourceAnswerId = answer.id;
+      if (buzzerAnswerError) {
+        throw new Error(buzzerAnswerError.message);
+      }
+
+      if (!buzzerAnswer) {
+        throw new Error("没有找到这个玩家回答。");
+      }
+
+      sourceAnswerId = buzzerAnswer.id;
+    }
   }
 
   const { data: updatedQuestion, error: updateError } = await supabase

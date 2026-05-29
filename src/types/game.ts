@@ -8,6 +8,8 @@ export type Player = {
 };
 
 export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
+export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED";
+export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
 
 export type Room = {
   id?: string;
@@ -80,6 +82,7 @@ export type GameSession = {
   questionSetId: string;
   presenterPlayerId: string;
   status: RoomStatus;
+  gameMode: GameMode;
   currentQuestionIndex: number;
   currentRevealRound: number;
   revealedBlocks: number[];
@@ -162,6 +165,7 @@ export type DbGameSession = {
   question_set_id: string;
   presenter_player_id: string;
   status: RoomStatus;
+  game_mode?: GameMode | null;
   current_question_index: number;
   current_reveal_round: number;
   revealed_blocks: unknown;
@@ -200,6 +204,34 @@ export type DbQuestionResult = {
   score_awarded: number;
   judged_by_player_id: string;
   judged_at: string;
+};
+
+export type BuzzerAnswer = {
+  id: string;
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+  answerText: string;
+  status: BuzzerAnswerStatus;
+  scoreAwarded: number;
+  submittedAt: string;
+  judgedAt?: string | null;
+  judgedByPlayerId?: string | null;
+};
+
+export type DbBuzzerAnswer = {
+  id: string;
+  game_session_id: string;
+  question_index: number;
+  reveal_round: number;
+  player_id: string;
+  answer_text: string;
+  status: BuzzerAnswerStatus;
+  score_awarded: number;
+  submitted_at: string;
+  judged_at: string | null;
+  judged_by_player_id: string | null;
 };
 
 export type LocalSession = {
