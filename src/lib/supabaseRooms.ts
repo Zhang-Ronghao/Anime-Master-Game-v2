@@ -1440,7 +1440,7 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
   const hasCorrectAnswer = correctSet.size > 0;
   const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
 
-  if (allPlayersCorrect || currentSession.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrectAnswer) {
+  if (allPlayersCorrect || (currentSession.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrectAnswer)) {
     return revealQuestionForReview(currentGameSession.id);
   }
 
@@ -1448,20 +1448,12 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
     return currentSession;
   }
 
-  if (hasCorrectAnswer && (roundEnded || allEligiblePlayersUsedChance)) {
-    return revealQuestionForReview(currentGameSession.id);
-  }
-
-  if (!hasCorrectAnswer && allEligiblePlayersUsedChance) {
+  if (roundEnded || allEligiblePlayersUsedChance) {
     if (currentRound >= currentSession.maxRevealRounds) {
       return revealQuestionForReview(currentGameSession.id);
     }
 
     return moveToNextRevealRound(currentGameSession);
-  }
-
-  if (!hasCorrectAnswer && roundEnded && currentRound >= currentSession.maxRevealRounds) {
-    return revealQuestionForReview(currentGameSession.id);
   }
 
   return currentSession;

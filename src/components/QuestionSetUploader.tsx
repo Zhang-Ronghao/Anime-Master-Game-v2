@@ -297,6 +297,11 @@ export function QuestionSetUploader({
   async function handleUpload() {
     clearError();
 
+    if (!title.trim()) {
+      onError("请先输入题库标题。");
+      return;
+    }
+
     if (items.length === 0) {
       onError("请先选择至少一张图片。");
       return;

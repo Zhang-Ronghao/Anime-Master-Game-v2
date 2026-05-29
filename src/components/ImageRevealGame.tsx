@@ -91,7 +91,7 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
   }
 
   const elapsedSeconds = Math.floor((Date.now() - new Date(roundStartedAt).getTime()) / 1000);
-  return Math.max(0, roundSeconds - elapsedSeconds);
+  return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
 }
 
 function toQuestion(question: DbQuestion): Question {
@@ -173,6 +173,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
@@ -225,7 +226,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           });
           setLabelAnswers([]);
           setMyAnswer(nextMyAnswer);
-          setAnswerText(nextMyAnswer?.answerText ?? "");
         }
       } else {
         const [nextBuzzerAnswers, nextLabelAnswers] = await Promise.all([
@@ -261,7 +261,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             playerId,
           });
           setMyBuzzerAnswer(nextMyBuzzerAnswer);
-          setAnswerText(nextMyBuzzerAnswer?.answerText ?? "");
         }
         setMyAnswer(null);
       }
@@ -501,6 +500,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   useEffect(() => {
     setAnswerBubbles({});
+    setAnswerText("");
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
@@ -517,6 +517,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const gridRows = TOTAL_BLOCKS / gridColumns;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
   const selectedBlockSet = useMemo(() => new Set(selectedBlocks), [selectedBlocks]);
+  const previewRevealedBlockSet = useMemo(
+    () => new Set([...(gameSession?.revealedBlocks ?? []), ...selectedBlocks]),
+    [gameSession?.revealedBlocks, selectedBlocks],
+  );
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
@@ -1137,6 +1141,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
               {isConfirmingReveal ? "确认中..." : "确认揭露"}
             </Button>
+            <button
+              className="rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={imageLoadFailed || selectedBlocks.length === 0}
+              type="button"
+              onBlur={() => setIsRevealPreviewOpen(false)}
+              onContextMenu={(event) => event.preventDefault()}
+              onPointerCancel={() => setIsRevealPreviewOpen(false)}
+              onPointerDown={() => setIsRevealPreviewOpen(true)}
+              onPointerLeave={() => setIsRevealPreviewOpen(false)}
+              onPointerUp={() => setIsRevealPreviewOpen(false)}
+            >
+              按住预览玩家视角
+            </button>
             {isBuzzerMode ? (
               <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
                 {isSettlingBuzzerRound ? "结算中..." : "结算本轮抢答"}
@@ -1246,6 +1263,36 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         <div className="min-w-0 lg:col-span-4">{imagePanel}</div>
         {actionPanel}
       </div>
+
+      {isPresenter && isRevealPreviewOpen && canRenderPortal
+        ? createPortal(
+            <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6">
+              <div
+                className="relative w-full max-w-5xl overflow-hidden rounded-md bg-black shadow-2xl"
+                style={{
+                  aspectRatio: imageAspectRatio,
+                  maxHeight: "86vh",
+                  maxWidth: isPortraitImage ? `min(80vw, calc(86vh * ${imageAspectRatio}))` : "min(92vw, 1280px)",
+                }}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
+                <div
+                  className="absolute inset-0 grid"
+                  style={{
+                    gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+                    <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
+                  ))}
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {isPresenter && canRenderPortal
         ? createPortal(
