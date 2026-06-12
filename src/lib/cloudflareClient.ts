@@ -39,6 +39,11 @@ const MUTATION_NAMES = new Set([
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",
   "settleBuzzerRound",
+  "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote",
+  "finalizeTeamBattleVote",
+  "judgeTeamBattleGuess",
+  "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance",
   "advanceReviewedQuestion",
   "publishQuestionSetToCommunity",
@@ -224,13 +229,9 @@ export async function callGameRpc<T>(name: string, args: unknown[] = []) {
   if (MUTATION_NAMES.has(name)) {
     const topic = inferActionTopic(name, args);
     if (topic) {
-      try {
-        const result = wsAction<T>(topic, name, args);
-        if (result) {
-          return await result;
-        }
-      } catch {
-        // Fall back to HTTP with the same logical action when the socket is unavailable.
+      const result = wsAction<T>(topic, name, args);
+      if (result) {
+        return await result;
       }
     }
   }

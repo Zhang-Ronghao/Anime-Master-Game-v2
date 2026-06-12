@@ -82,6 +82,7 @@ const gameModeText: Record<GameMode, string> = {
   ROUND_REVEAL: "轮揭竞答模式",
   BUZZER_FIRST_CORRECT: "抢答模式 - 首答制",
   BUZZER_RANKED: "抢答模式 - 排名得分制",
+  TEAM_BATTLE: "红蓝对抗揭图模式",
 };
 
 function getPresenterName(players: Player[], presenterPlayerId?: string | null) {
@@ -157,6 +158,7 @@ function GameSettingsPanel({
   onChange: (settings: GameSettings) => void;
 }) {
   const isRoundRevealMode = settings.gameMode === "ROUND_REVEAL";
+  const isTeamBattleMode = settings.gameMode === "TEAM_BATTLE";
 
   function updateRounds(nextRounds: number) {
     onChange({
@@ -196,6 +198,7 @@ function GameSettingsPanel({
           ))}
         </select>
       </label>
+      {!isTeamBattleMode ? (
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block">
           <span className="mb-2 block text-sm font-medium text-slate-900">揭露轮数</span>
@@ -224,6 +227,7 @@ function GameSettingsPanel({
           />
         </label>
       </div>
+      ) : null}
       {isRoundRevealMode ? (
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         {Array.from({ length: settings.maxRevealRounds }, (_, index) => (
@@ -240,6 +244,10 @@ function GameSettingsPanel({
           </label>
         ))}
       </div>
+      ) : isTeamBattleMode ? (
+        <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+          除出题者外自动分成红蓝两队。每回合由当前队伍投票选择揭露方块，再投票决定是否猜测；猜中队伍 +1 分，猜错则对方下回合可揭露 2 个方块。
+        </div>
       ) : (
         <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
           {settings.gameMode === "BUZZER_FIRST_CORRECT"

@@ -17,7 +17,7 @@ type OrderBy = {
   ascending: boolean;
 };
 
-const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores"]);
+const JSON_COLUMNS = new Set(["revealed_blocks", "round_scores", "team_battle_state"]);
 const BOOLEAN_COLUMNS = new Set(["is_host", "is_public"]);
 const UPDATED_AT_TABLES = new Set(["rooms", "question_sets", "question_set_ratings"]);
 const ID_TABLES = new Set([
@@ -114,6 +114,15 @@ function cleanRecord(table: string, record: Record<string, unknown>) {
   }
 
   return next;
+}
+
+function hasExplicitPrimaryKey(table: string, record: Record<string, unknown>) {
+  if (!ID_TABLES.has(table) || !Object.prototype.hasOwnProperty.call(record, "id")) {
+    return false;
+  }
+
+  const normalized = normalizeValue("id", record.id);
+  return normalized !== undefined && normalized !== null && normalized !== "";
 }
 
 function sqlIdentifier(value: string) {
@@ -301,16 +310,23 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     const rows: Record<string, unknown>[] = [];
 
     for (const rawRecord of records) {
+      const updateGeneratedId = hasExplicitPrimaryKey(this.table, rawRecord);
       const record = cleanRecord(this.table, rawRecord);
       const columns = Object.keys(record);
       const values = columns.map((column) => record[column]);
       const placeholders = columns.map(() => "?").join(", ");
+      const updateColumns = columns.filter(
+        (column) => !this.conflictColumns.includes(column) && (column !== "id" || updateGeneratedId),
+      );
       const conflict =
         this.conflictColumns.length > 0
-          ? ` ON CONFLICT (${this.conflictColumns.map(sqlIdentifier).join(", ")}) DO UPDATE SET ${columns
-              .filter((column) => !this.conflictColumns.includes(column))
-              .map((column) => `${sqlIdentifier(column)} = excluded.${sqlIdentifier(column)}`)
-              .join(", ")}`
+          ? ` ON CONFLICT (${this.conflictColumns.map(sqlIdentifier).join(", ")}) ${
+              updateColumns.length > 0
+                ? `DO UPDATE SET ${updateColumns
+                    .map((column) => `${sqlIdentifier(column)} = excluded.${sqlIdentifier(column)}`)
+                    .join(", ")}`
+                : "DO NOTHING"
+            }`
           : "";
       const sql = `INSERT INTO ${sqlIdentifier(this.table)} (${columns
         .map(sqlIdentifier)

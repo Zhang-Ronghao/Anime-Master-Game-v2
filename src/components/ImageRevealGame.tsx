@@ -8,6 +8,7 @@ import {
   advanceReviewedQuestion,
   confirmRevealBlocks,
   endCurrentGameEarly,
+  finalizeTeamBattleVote,
   getAnswersForQuestion,
   getAnswerForPlayerRound,
   getAnswersForQuestionRound,
@@ -19,11 +20,15 @@ import {
   getQuestionResultsForQuestion,
   getQuestionsByQuestionSetId,
   gradeAnswersAndAdvance,
+  judgeTeamBattleGuess,
   judgeBuzzerAnswer,
+  revealTeamBattleAnswer,
   settleBuzzerRound,
   skipCurrentQuestion,
   submitAnswer,
   submitBuzzerAnswer,
+  submitTeamBattleGuessVote,
+  submitTeamBattleRevealVote,
   updateQuestionLabel,
 } from "@/lib/cloudflareRooms";
 import type {
@@ -38,6 +43,8 @@ import type {
   Question,
   QuestionResult,
   Room,
+  TeamBattleGuessVote,
+  TeamBattleTeam,
 } from "@/types/game";
 
 type ImageRevealGameProps = {
@@ -92,6 +99,14 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
 
   const elapsedSeconds = Math.floor((Date.now() - new Date(roundStartedAt).getTime()) / 1000);
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
+}
+
+function getTeamName(team: TeamBattleTeam) {
+  return team === "red" ? "红队" : "蓝队";
+}
+
+function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
+  return team === "red" ? "blue" : "red";
 }
 
 function toQuestion(question: DbQuestion): Question {
@@ -215,6 +230,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
+  const [teamSelectedBlocks, setTeamSelectedBlocks] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [answerBubbles, setAnswerBubbles] = useState<Record<string, AnswerBubble>>({});
   const [buzzerAnswers, setBuzzerAnswers] = useState<BuzzerAnswer[]>([]);
@@ -222,6 +238,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [labelAnswers, setLabelAnswers] = useState<Answer[]>([]);
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null);
   const [answerText, setAnswerText] = useState("");
+  const [teamGuessText, setTeamGuessText] = useState("");
   const [labelInput, setLabelInput] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
@@ -233,6 +250,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isGrading, setIsGrading] = useState(false);
   const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
+  const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
+  const [isFinalizingTeamBattle, setIsFinalizingTeamBattle] = useState(false);
+  const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
@@ -293,6 +313,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           });
           setLabelAnswers([]);
           setMyAnswer(nextMyAnswer);
+        }
+      } else if (targetGameSession.gameMode === "TEAM_BATTLE") {
+        setAnswers([]);
+        setBuzzerAnswers([]);
+        setMyAnswer(null);
+        setMyBuzzerAnswer(null);
+        if (isPresenter) {
+          setLabelAnswers([]);
+        } else {
+          setLabelAnswers([]);
         }
       } else {
         const [nextBuzzerAnswers, nextLabelAnswers] = await Promise.all([
@@ -529,6 +559,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   useEffect(() => {
     setAnswerBubbles({});
     setAnswerText("");
+    setTeamGuessText("");
+    setTeamSelectedBlocks([]);
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
@@ -553,15 +585,57 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
   const currentScore = gameSession?.roundScores[Math.min(maxRevealRounds, currentRound) - 1] ?? 1;
-  const isBuzzerMode = gameSession?.gameMode !== "ROUND_REVEAL";
+  const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
+  const teamBattleState = gameSession?.teamBattleState ?? null;
+  const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
-  const isQuestionReviewing = !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
+  const isQuestionReviewing = isTeamBattleMode
+    ? teamBattleState?.phase === "REVIEW"
+    : !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
+  const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
+    ? "red"
+    : teamBattleState?.teams.blue.includes(playerId)
+      ? "blue"
+      : null;
+  const teamBattleActiveTeam = teamBattleState?.activeTeam ?? "red";
+  const teamBattleActiveMembers = teamBattleState?.teams[teamBattleActiveTeam] ?? [];
+  const teamBattleCanAct = Boolean(!isPresenter && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
+  const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
+  const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
+  const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
+  const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
+    ? Math.max(0, Math.ceil((new Date(teamBattleState.voteDeadlineAt).getTime() - Date.now()) / 1000))
+    : null;
+  const teamBattleRevealVoteCounts = useMemo(() => {
+    const counts: Record<number, number> = {};
+    for (const blocks of Object.values(teamBattleState?.revealVotes ?? {})) {
+      for (const block of blocks) {
+        counts[block] = (counts[block] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [teamBattleState?.revealVotes]);
+  const teamBattleGuessOptions = useMemo(() => {
+    const options = new Map<string, { key: string; label: string; vote: TeamBattleGuessVote; count: number }>();
+    for (const vote of Object.values(teamBattleState?.guessVotes ?? {})) {
+      const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText}`;
+      const label = vote.type === "skip" ? "不猜" : vote.answerText ?? "";
+      const current = options.get(key);
+      options.set(key, {
+        key,
+        label,
+        vote,
+        count: (current?.count ?? 0) + 1,
+      });
+    }
+    return Array.from(options.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }, [teamBattleState?.guessVotes]);
   const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
@@ -582,6 +656,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     .sort((a, b) => b.score - a.score);
   const canConfirmReveal =
     isPresenter &&
+    !isTeamBattleMode &&
     selectedBlocks.length > 0 &&
     !isConfirmingReveal &&
     !isQuestionReviewing &&
@@ -589,7 +664,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
-    !isPresenter && !isBuzzerMode && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
+    !isPresenter && !isBuzzerMode && !isTeamBattleMode && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
     isBuzzerMode &&
@@ -598,7 +673,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !myBuzzerAnswer &&
     isRoundActive &&
     answerText.trim().length > 0;
-  const canGrade = isPresenter && !isBuzzerMode && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
+  const canGrade = isPresenter && !isBuzzerMode && !isTeamBattleMode && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
   const canJudgeBuzzer = isPresenter && isBuzzerMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
     isPresenter &&
@@ -645,6 +720,32 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLastAutoLabelKey(autoLabelKey);
     }
   }, [canAddQuestionLabel, gameSession, isJudgeModalOpen, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
+
+  useEffect(() => {
+    if (!gameSession || !teamBattleState?.voteDeadlineAt || isFinalizingTeamBattle) {
+      return;
+    }
+
+    const delayMs = Math.max(0, new Date(teamBattleState.voteDeadlineAt).getTime() - Date.now());
+    const timer = window.setTimeout(() => {
+      setIsFinalizingTeamBattle(true);
+      finalizeTeamBattleVote({ gameSessionId: gameSession.id })
+        .then(async (finalized) => {
+          setGameSession(finalized.gameSession);
+          setSelectedBlocks([]);
+          setTeamSelectedBlocks([]);
+          await refreshRoundData(finalized.gameSession);
+        })
+        .catch((error) => {
+          onError(error instanceof Error ? error.message : "结算团队投票失败。");
+        })
+        .finally(() => {
+          setIsFinalizingTeamBattle(false);
+        });
+    }, delayMs + 80);
+
+    return () => window.clearTimeout(timer);
+  }, [gameSession, isFinalizingTeamBattle, onError, refreshRoundData, teamBattleState?.voteDeadlineAt]);
 
   async function saveQuestionLabel(params: { labelText: string; source: "manual" | "answer"; answerId?: string | null }) {
     if (!gameSession || !currentQuestion || !canAddQuestionLabel) {
@@ -710,6 +811,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     );
   }
 
+  function toggleTeamBattleBlock(blockIndex: number) {
+    if (
+      !teamBattleCanAct ||
+      teamBattleState?.phase !== "REVEAL_VOTE" ||
+      revealedBlockSet.has(blockIndex) ||
+      teamBattleVoteSeconds === 0
+    ) {
+      return;
+    }
+
+    setTeamSelectedBlocks((currentBlocks) => {
+      if (currentBlocks.includes(blockIndex)) {
+        return currentBlocks.filter((block) => block !== blockIndex);
+      }
+
+      const nextBlocks = [...currentBlocks, blockIndex].sort((a, b) => a - b);
+      return nextBlocks.slice(Math.max(0, nextBlocks.length - teamBattleRequiredBlockCount));
+    });
+  }
+
   function toggleCorrectPlayer(targetPlayerId: string) {
     if (correctPlayerSet.has(targetPlayerId)) {
       return;
@@ -742,6 +863,97 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       onError(error instanceof Error ? error.message : "确认揭露失败。");
     } finally {
       setIsConfirmingReveal(false);
+    }
+  }
+
+  async function handleSubmitTeamBattleRevealVote() {
+    if (!gameSession || !teamBattleState) {
+      return;
+    }
+
+    setIsSubmittingTeamBattle(true);
+    try {
+      const updatedGameSession = await submitTeamBattleRevealVote({
+        gameSessionId: gameSession.id,
+        playerId,
+        selectedBlocks: teamSelectedBlocks,
+      });
+      setGameSession(updatedGameSession);
+      await refreshRoundData(updatedGameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提交揭露投票失败。");
+    } finally {
+      setIsSubmittingTeamBattle(false);
+    }
+  }
+
+  async function handleSubmitTeamBattleGuessVote(vote: TeamBattleGuessVote) {
+    if (!gameSession || !teamBattleState) {
+      return;
+    }
+
+    setIsSubmittingTeamBattle(true);
+    try {
+      const updatedGameSession = await submitTeamBattleGuessVote({
+        gameSessionId: gameSession.id,
+        playerId,
+        vote,
+      });
+      setGameSession(updatedGameSession);
+      await refreshRoundData(updatedGameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提交猜测投票失败。");
+    } finally {
+      setIsSubmittingTeamBattle(false);
+    }
+  }
+
+  async function handleJudgeTeamBattleGuess(isCorrect: boolean) {
+    if (!gameSession || !teamBattleState?.pendingGuess) {
+      return;
+    }
+
+    setIsJudgingTeamBattle(true);
+    try {
+      const judged = await judgeTeamBattleGuess({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        isCorrect,
+      });
+      setGameSession(judged.gameSession);
+      setTeamSelectedBlocks([]);
+      await refreshRoundData(judged.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "判定团队猜测失败。");
+    } finally {
+      setIsJudgingTeamBattle(false);
+    }
+  }
+
+  async function handleRevealTeamBattleAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    const confirmed = window.confirm("确认直接公布答案吗？本题红蓝两队都不会加分。");
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSkippingQuestion(true);
+    try {
+      const revealed = await revealTeamBattleAnswer({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+      });
+      setGameSession(revealed.gameSession);
+      setImageLoadFailed(false);
+      setTeamSelectedBlocks([]);
+      await refreshRoundData(revealed.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "公布答案失败。");
+    } finally {
+      setIsSkippingQuestion(false);
     }
   }
 
@@ -966,6 +1178,37 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+      {isTeamBattleMode && teamBattleState ? (
+        <div className="mb-4 space-y-2">
+          <p className="text-sm font-semibold text-slate-900">红蓝队比分</p>
+          {(["red", "blue"] as const).map((team) => {
+            const teamMembers = teamBattleState.teams[team]
+              .map((memberId) => room.players.find((player) => player.id === memberId)?.nickname ?? memberId)
+              .join("、");
+            const isActiveTeam = teamBattleState.activeTeam === team;
+
+            return (
+              <div
+                className={[
+                  "rounded-md border px-3 py-2 text-sm",
+                  team === "red" ? "border-red-200 bg-red-50" : "border-sky-200 bg-sky-50",
+                  isActiveTeam ? "ring-2 ring-slate-900/10" : "",
+                ].join(" ")}
+                key={team}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className={team === "red" ? "font-semibold text-red-700" : "font-semibold text-sky-700"}>
+                    {getTeamName(team)}
+                    {isActiveTeam ? "（行动中）" : ""}
+                  </span>
+                  <span className="text-lg font-bold text-slate-950">{teamBattleState.teamScores[team]}</span>
+                </div>
+                <p className="mt-1 break-words text-xs text-[var(--muted)]">{teamMembers || "暂无队员"}</p>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
         {scoreRows.map(({ player, score, correctCount }, index) => {
@@ -1050,7 +1293,50 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           </div>
         ) : null}
 
-        {!isPresenter && !imageLoadFailed ? (
+        {isTeamBattleMode && !imageLoadFailed ? (
+          <div
+            className="absolute inset-0 grid"
+            style={{
+              gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+              gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+            }}
+          >
+            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
+              const isRevealed = revealedBlockSet.has(blockIndex);
+              const isSelected = teamSelectedBlocks.includes(blockIndex);
+              const voteCount = canSeeTeamBattleVotes ? teamBattleRevealVoteCounts[blockIndex] ?? 0 : 0;
+              const canPickBlock =
+                teamBattleCanAct &&
+                teamBattleState?.phase === "REVEAL_VOTE" &&
+                !isRevealed &&
+                teamBattleVoteSeconds !== 0;
+
+              return (
+                <button
+                  aria-label={`方块 ${blockIndex + 1}`}
+                  className={[
+                    "relative border border-white/45 text-xs font-bold transition disabled:cursor-default",
+                    isRevealed ? "bg-transparent" : "bg-black",
+                    isSelected ? "bg-emerald-500/55 ring-2 ring-emerald-300" : "",
+                    canPickBlock && !isSelected ? "hover:bg-emerald-500/35" : "",
+                  ].join(" ")}
+                  disabled={!canPickBlock}
+                  key={blockIndex}
+                  type="button"
+                  onClick={() => toggleTeamBattleBlock(blockIndex)}
+                >
+                  {!isRevealed && voteCount > 0 ? (
+                    <span className="absolute left-1 top-1 grid h-5 min-w-5 place-items-center rounded bg-emerald-400 px-1 text-[11px] text-slate-950">
+                      {voteCount}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {!isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -1064,7 +1350,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           </div>
         ) : null}
 
-        {isPresenter && !imageLoadFailed ? (
+        {isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -1127,6 +1413,164 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <Button className="mt-3 w-full" type="button" onClick={handleAdvanceReviewedQuestion} disabled={isAdvancingQuestion}>
               {isAdvancingQuestion ? "切换中..." : hasNextQuestion ? "下一张图片" : "查看排行榜"}
             </Button>
+          ) : null}
+        </>
+      ) : isTeamBattleMode && teamBattleState ? (
+        <>
+          <p className="text-sm font-semibold text-slate-950">红蓝对抗</p>
+          <div className="mt-2 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+            <p className="font-semibold text-slate-950">
+              {getTeamName(teamBattleActiveTeam)} ·{" "}
+              {teamBattleState.phase === "REVEAL_VOTE"
+                ? "选择揭露方块"
+                : teamBattleState.phase === "GUESS_VOTE"
+                  ? "决定是否猜测"
+                  : teamBattleState.phase === "JUDGING"
+                    ? "等待裁判判定"
+                    : "本题复盘"}
+            </p>
+            <p className="mt-1 text-[var(--muted)]">{teamBattleState.message}</p>
+            {teamBattleVoteSeconds !== null ? (
+              <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+                自由修改倒计时：{teamBattleVoteSeconds} 秒
+              </p>
+            ) : null}
+          </div>
+
+          {teamBattleState.phase === "REVEAL_VOTE" ? (
+            <div className="mt-3 space-y-3">
+              <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+                <p className="font-semibold text-slate-950">
+                  本回合需选择 {teamBattleRequiredBlockCount} 个方块
+                </p>
+                <p className="mt-1 text-[var(--muted)]">
+                  已提交 {Object.keys(teamBattleState.revealVotes).length} / {teamBattleActiveMembers.length} 人。
+                </p>
+                {!isPresenter && teamBattlePlayerTeam ? (
+                  <p className="mt-1 text-[var(--muted)]">
+                    你属于{getTeamName(teamBattlePlayerTeam)}
+                    {teamBattleCanAct ? "，当前可以投票。" : "，等待对方队伍行动。"}
+                  </p>
+                ) : null}
+              </div>
+              {teamBattleCanAct ? (
+                <Button
+                  className="w-full"
+                  type="button"
+                  onClick={handleSubmitTeamBattleRevealVote}
+                  disabled={
+                    isSubmittingTeamBattle ||
+                    teamSelectedBlocks.length !== teamBattleRequiredBlockCount ||
+                    teamBattleVoteSeconds === 0
+                  }
+                >
+                  {isSubmittingTeamBattle ? "提交中..." : "提交揭露投票"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {teamBattleState.phase === "GUESS_VOTE" ? (
+            <div className="mt-3 space-y-3">
+              <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+                <p className="font-semibold text-slate-950">
+                  已提交 {Object.keys(teamBattleState.guessVotes).length} / {teamBattleActiveMembers.length} 人
+                </p>
+                <div className="mt-2 space-y-2">
+                  {canSeeTeamBattleVotes && teamBattleGuessOptions.length > 0 ? (
+                    teamBattleGuessOptions.map((option) => (
+                      <button
+                        className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm hover:border-emerald-300"
+                        key={option.key}
+                        type="button"
+                        onClick={() => {
+                          if (option.vote.type === "guess") {
+                            setTeamGuessText(option.vote.answerText ?? "");
+                          }
+                        }}
+                      >
+                        <span className="min-w-0 truncate">{option.label}</span>
+                        <span className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                          {option.count}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="text-[var(--muted)]">
+                      {canSeeTeamBattleVotes ? "还没有队员提交选择。" : "等待当前队伍完成内部投票。"}
+                    </p>
+                  )}
+                </div>
+              </div>
+              {teamBattleCanAct ? (
+                <div className="space-y-2">
+                  <Button
+                    className="w-full"
+                    type="button"
+                    variant="secondary"
+                    onClick={() => handleSubmitTeamBattleGuessVote({ type: "skip" })}
+                    disabled={isSubmittingTeamBattle || teamBattleVoteSeconds === 0}
+                  >
+                    投票不猜
+                  </Button>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-900">猜测答案</span>
+                    <input
+                      className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                      maxLength={80}
+                      placeholder="输入动画名称"
+                      value={teamGuessText}
+                      onChange={(event) => setTeamGuessText(event.target.value)}
+                    />
+                  </label>
+                  <Button
+                    className="w-full"
+                    type="button"
+                    onClick={() => handleSubmitTeamBattleGuessVote({ type: "guess", answerText: teamGuessText })}
+                    disabled={isSubmittingTeamBattle || teamGuessText.trim().length === 0 || teamBattleVoteSeconds === 0}
+                  >
+                    提交猜测投票
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess ? (
+            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="font-semibold text-slate-950">
+                {getTeamName(teamBattleState.pendingGuess.team)}猜测
+              </p>
+              <p className="mt-2 break-words text-lg font-semibold text-slate-950">{teamBattleState.pendingGuess.answerText}</p>
+              {isPresenter ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>
+                    猜对
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => handleJudgeTeamBattleGuess(false)}
+                    disabled={isJudgingTeamBattle}
+                  >
+                    猜错
+                  </Button>
+                </div>
+              ) : (
+                <p className="mt-2 text-[var(--muted)]">等待出题人判定。</p>
+              )}
+            </div>
+          ) : null}
+
+          {isPresenter ? (
+            <div className="mt-3 grid gap-2">
+              <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
+                {isSkippingQuestion ? "公布中..." : "直接公布答案"}
+              </Button>
+              <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
+                {isEndingGame ? "结束中..." : "结束本局游戏"}
+              </Button>
+            </div>
           ) : null}
         </>
       ) : isPresenter ? (

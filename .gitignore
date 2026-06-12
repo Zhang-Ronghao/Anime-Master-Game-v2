@@ -21,7 +21,10 @@ yarn-error.log*
 .pnpm-debug.log*
 *.out.log
 *.err.log
+.cache/
 .wrangler/
+.wrangler.bak-*/
+wrangler-local/
 
 # env files
 .env*

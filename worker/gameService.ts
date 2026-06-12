@@ -21,6 +21,9 @@ import type {
   QuestionResult,
   QuestionSet,
   Room,
+  TeamBattleGuessVote,
+  TeamBattleState,
+  TeamBattleTeam,
 } from "../src/types/game";
 
 let d1 = createD1QueryClient(null);
@@ -117,6 +120,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
     ? gameSession.round_scores.filter((score): score is number => Number.isFinite(score))
     : [3, 2, 1];
+  const teamBattleState = parseTeamBattleState(gameSession.team_battle_state);
 
   return {
     id: gameSession.id,
@@ -132,9 +136,203 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     roundSeconds: gameSession.round_seconds ?? 60,
     roundScores,
     roundStartedAt: gameSession.round_started_at,
+    teamBattleState,
     createdAt: gameSession.created_at,
     endedAt: gameSession.ended_at,
   };
+}
+
+function parseTeamBattleState(value: unknown): TeamBattleState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Partial<TeamBattleState>;
+  const teamsRecord = record.teams && typeof record.teams === "object" ? record.teams : null;
+  const redTeam = Array.isArray(teamsRecord?.red) ? teamsRecord.red.filter((id): id is string => typeof id === "string") : [];
+  const blueTeam = Array.isArray(teamsRecord?.blue) ? teamsRecord.blue.filter((id): id is string => typeof id === "string") : [];
+  const activeTeam = record.activeTeam === "blue" ? "blue" : "red";
+  const phase =
+    record.phase === "GUESS_VOTE" || record.phase === "JUDGING" || record.phase === "REVIEW" ? record.phase : "REVEAL_VOTE";
+  const teamScoresRecord = record.teamScores && typeof record.teamScores === "object" ? record.teamScores : null;
+
+  return {
+    teams: {
+      red: redTeam,
+      blue: blueTeam,
+    },
+    activeTeam,
+    phase,
+    revealLimit: Math.max(1, Math.min(10, Math.floor(Number(record.revealLimit) || 1))),
+    turnNumber: Math.max(1, Math.floor(Number(record.turnNumber) || 1)),
+    voteDeadlineAt: typeof record.voteDeadlineAt === "string" ? record.voteDeadlineAt : null,
+    revealVotes: normalizeRevealVotes(record.revealVotes),
+    guessVotes: normalizeGuessVotes(record.guessVotes),
+    pendingGuess:
+      record.pendingGuess &&
+      typeof record.pendingGuess === "object" &&
+      (record.pendingGuess.team === "red" || record.pendingGuess.team === "blue") &&
+      typeof record.pendingGuess.answerText === "string"
+        ? {
+            team: record.pendingGuess.team,
+            answerText: record.pendingGuess.answerText,
+          }
+        : null,
+    teamScores: {
+      red: Math.max(0, Math.floor(Number(teamScoresRecord?.red) || 0)),
+      blue: Math.max(0, Math.floor(Number(teamScoresRecord?.blue) || 0)),
+    },
+    message: typeof record.message === "string" ? record.message : null,
+  };
+}
+
+function normalizeRevealVotes(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const votes: Record<string, number[]> = {};
+  for (const [playerId, blocks] of Object.entries(value)) {
+    if (Array.isArray(blocks)) {
+      votes[playerId] = Array.from(
+        new Set(blocks.filter((block): block is number => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT)),
+      ).sort((a, b) => a - b);
+    }
+  }
+
+  return votes;
+}
+
+function normalizeGuessVotes(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const votes: Record<string, TeamBattleGuessVote> = {};
+  for (const [playerId, vote] of Object.entries(value)) {
+    if (!vote || typeof vote !== "object" || Array.isArray(vote)) {
+      continue;
+    }
+
+    const record = vote as Partial<TeamBattleGuessVote>;
+    if (record.type === "skip") {
+      votes[playerId] = { type: "skip" };
+    } else if (record.type === "guess" && typeof record.answerText === "string" && record.answerText.trim()) {
+      votes[playerId] = { type: "guess", answerText: record.answerText.trim() };
+    }
+  }
+
+  return votes;
+}
+
+function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: string, previousScores?: Record<TeamBattleTeam, number>): TeamBattleState {
+  const guessers = players
+    .filter((player) => player.id !== presenterPlayerId)
+    .sort((a, b) => a.joined_at.localeCompare(b.joined_at));
+  const red: string[] = [];
+  const blue: string[] = [];
+
+  guessers.forEach((player, index) => {
+    (index % 2 === 0 ? red : blue).push(player.id);
+  });
+
+  return {
+    teams: { red, blue },
+    activeTeam: "red",
+    phase: "REVEAL_VOTE",
+    revealLimit: 1,
+    turnNumber: 1,
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+    teamScores: previousScores ?? { red: 0, blue: 0 },
+    message: "红队先手，请投票选择要揭露的方块。",
+  };
+}
+
+function resetTeamBattleStateForQuestion(state: TeamBattleState): TeamBattleState {
+  return {
+    teams: state.teams,
+    activeTeam: "red",
+    phase: "REVEAL_VOTE",
+    revealLimit: 1,
+    turnNumber: state.turnNumber + 1,
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+    teamScores: state.teamScores,
+    message: "进入下一张图，红队先手选择要揭露的方块。",
+  };
+}
+
+function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
+  return team === "red" ? "blue" : "red";
+}
+
+function getTeamName(team: TeamBattleTeam) {
+  return team === "red" ? "红队" : "蓝队";
+}
+
+function getTeamMembers(state: TeamBattleState, team: TeamBattleTeam) {
+  return state.teams[team] ?? [];
+}
+
+function getPlayerTeam(state: TeamBattleState, playerId: string): TeamBattleTeam | null {
+  if (state.teams.red.includes(playerId)) {
+    return "red";
+  }
+  if (state.teams.blue.includes(playerId)) {
+    return "blue";
+  }
+  return null;
+}
+
+function isTeamVotingComplete(state: TeamBattleState, votes: Record<string, unknown>) {
+  const members = getTeamMembers(state, state.activeTeam);
+  return members.length > 0 && members.every((memberId) => Object.prototype.hasOwnProperty.call(votes, memberId));
+}
+
+function withVoteDeadlineIfComplete(state: TeamBattleState, votes: Record<string, unknown>) {
+  if (state.voteDeadlineAt || !isTeamVotingComplete(state, votes)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    voteDeadlineAt: new Date(Date.now() + TEAM_BATTLE_VOTE_GRACE_SECONDS * 1000).toISOString(),
+    message: `${getTeamName(state.activeTeam)}所有成员都已提交，进入 ${TEAM_BATTLE_VOTE_GRACE_SECONDS} 秒自由修改时间。`,
+  };
+}
+
+function assertTeamBattleSession(gameSession: DbGameSession) {
+  const session = toGameSession(gameSession);
+  if (session.gameMode !== "TEAM_BATTLE" || !session.teamBattleState) {
+    throw new Error("Game action failed.");
+  }
+  return session;
+}
+
+function voteDeadlineReached(state: TeamBattleState) {
+  return Boolean(state.voteDeadlineAt && Date.now() >= new Date(state.voteDeadlineAt).getTime());
+}
+
+function randomChoice<T>(items: T[]) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function updateTeamBattleState(gameSessionId: string, state: TeamBattleState, extra?: Record<string, unknown>) {
+  return d1
+    .from("game_sessions")
+    .update({
+      team_battle_state: state,
+      ...extra,
+    })
+    .eq("id", gameSessionId)
+    .eq("status", "PLAYING")
+    .select()
+    .single<DbGameSession>();
 }
 
 function toBuzzerAnswer(answer: DbBuzzerAnswer): BuzzerAnswer {
@@ -195,6 +393,7 @@ function isUniqueViolation(error: { code?: string } | null) {
 const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
+const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 
 export type QuestionImportItem = {
   imageUrl: string;
@@ -835,6 +1034,22 @@ export async function startGameWithQuestionSet(params: {
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
   const roundSeconds = Math.max(1, Math.min(600, Math.floor(params.roundSeconds ?? 60)));
   const gameMode = params.gameMode ?? "ROUND_REVEAL";
+  const { data: players, error: playersError } = await d1
+    .from("players")
+    .select("*")
+    .eq("room_id", params.roomId)
+    .returns<DbPlayer[]>();
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  const teamBattleGuessers = (players ?? []).filter((player) => player.id !== params.presenterPlayerId);
+  if (gameMode === "TEAM_BATTLE" && teamBattleGuessers.length < 2) {
+    throw new Error("红蓝对抗模式至少需要 2 名答题者。");
+  }
+
+  const teamBattleState = gameMode === "TEAM_BATTLE" ? createInitialTeamBattleState(players ?? [], params.presenterPlayerId) : null;
   const roundScores = Array.from({ length: maxRevealRounds }, (_, index) => {
     const score = params.roundScores?.[index] ?? Math.max(1, maxRevealRounds - index);
     return Math.max(0, Math.floor(score));
@@ -851,6 +1066,7 @@ export async function startGameWithQuestionSet(params: {
       max_reveal_rounds: maxRevealRounds,
       round_seconds: roundSeconds,
       round_scores: roundScores,
+      team_battle_state: teamBattleState,
     })
     .select()
     .single<DbGameSession>();
@@ -1793,6 +2009,445 @@ export async function settleBuzzerRound(params: {
   };
 }
 
+export async function submitTeamBattleRevealVote(params: {
+  gameSessionId: string;
+  playerId: string;
+  selectedBlocks: number[];
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("Game action failed.");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+
+  if (state.phase !== "REVEAL_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
+    throw new Error("Game action failed.");
+  }
+
+  const revealedSet = new Set(session.revealedBlocks);
+  const availableCount = REVEAL_BLOCK_COUNT - revealedSet.size;
+  const requiredCount = Math.min(state.revealLimit, availableCount);
+  const selectedBlocks = Array.from(
+    new Set(params.selectedBlocks.filter((block) => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT && !revealedSet.has(block))),
+  ).sort((a, b) => a - b);
+
+  if (selectedBlocks.length !== requiredCount) {
+    throw new Error("Game action failed.");
+  }
+
+  const revealVotes = {
+    ...state.revealVotes,
+    [params.playerId]: selectedBlocks,
+  };
+  const nextState = withVoteDeadlineIfComplete(
+    {
+      ...state,
+      revealVotes,
+      message: `${getTeamName(state.activeTeam)}正在投票选择 ${requiredCount} 个方块。`,
+    },
+    revealVotes,
+  );
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toGameSession(updatedGameSession);
+}
+
+export async function submitTeamBattleGuessVote(params: {
+  gameSessionId: string;
+  playerId: string;
+  vote: TeamBattleGuessVote;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("Game action failed.");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+
+  if (state.phase !== "GUESS_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
+    throw new Error("Game action failed.");
+  }
+
+  const vote =
+    params.vote.type === "skip"
+      ? { type: "skip" as const }
+      : {
+          type: "guess" as const,
+          answerText: params.vote.answerText?.trim() ?? "",
+        };
+
+  if (vote.type === "guess" && !vote.answerText) {
+    throw new Error("Game action failed.");
+  }
+
+  const guessVotes = {
+    ...state.guessVotes,
+    [params.playerId]: vote,
+  };
+  const nextState = withVoteDeadlineIfComplete(
+    {
+      ...state,
+      guessVotes,
+      message: `${getTeamName(state.activeTeam)}正在投票决定是否猜测。`,
+    },
+    guessVotes,
+  );
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toGameSession(updatedGameSession);
+}
+
+export async function finalizeTeamBattleVote(params: {
+  gameSessionId: string;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("Game action failed.");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+
+  if ((state.phase !== "REVEAL_VOTE" && state.phase !== "GUESS_VOTE") || !voteDeadlineReached(state)) {
+    return { gameSession: session };
+  }
+
+  if (state.phase === "REVEAL_VOTE") {
+    const revealedSet = new Set(session.revealedBlocks);
+    const availableBlocks = ALL_REVEALED_BLOCKS.filter((block) => !revealedSet.has(block));
+    const revealCount = Math.min(state.revealLimit, availableBlocks.length);
+    const voteCounts = new Map(availableBlocks.map((block) => [block, 0]));
+
+    for (const blocks of Object.values(state.revealVotes)) {
+      for (const block of blocks) {
+        if (voteCounts.has(block)) {
+          voteCounts.set(block, (voteCounts.get(block) ?? 0) + 1);
+        }
+      }
+    }
+
+    const remaining = availableBlocks.slice();
+    const selectedBlocks: number[] = [];
+    let tieMessage = "";
+
+    while (selectedBlocks.length < revealCount && remaining.length > 0) {
+      const highest = Math.max(...remaining.map((block) => voteCounts.get(block) ?? 0));
+      const tied = remaining.filter((block) => (voteCounts.get(block) ?? 0) === highest);
+      const slots = revealCount - selectedBlocks.length;
+
+      if (tied.length <= slots) {
+        selectedBlocks.push(...tied);
+      } else {
+        const shuffled = tied.slice().sort(() => Math.random() - 0.5);
+        selectedBlocks.push(...shuffled.slice(0, slots));
+        tieMessage = `由于多个方块同票，随机选择了 ${shuffled.slice(0, slots).map((block) => block + 1).join("、")}。`;
+      }
+
+      for (const block of tied) {
+        const index = remaining.indexOf(block);
+        if (index >= 0) {
+          remaining.splice(index, 1);
+        }
+      }
+    }
+
+    const nextBlocks = Array.from(new Set([...session.revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
+    const nextState: TeamBattleState = {
+      ...state,
+      phase: "GUESS_VOTE",
+      voteDeadlineAt: null,
+      revealVotes: {},
+      guessVotes: {},
+      pendingGuess: null,
+      message: `${getTeamName(state.activeTeam)}揭露了 ${selectedBlocks.map((block) => block + 1).join("、")} 号方块。${tieMessage}`,
+    };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+      revealed_blocks: nextBlocks,
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { gameSession: toGameSession(updatedGameSession) };
+  }
+
+  const optionCounts = new Map<string, { count: number; vote: TeamBattleGuessVote }>();
+  for (const vote of Object.values(state.guessVotes)) {
+    const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText?.trim() ?? ""}`;
+    const existing = optionCounts.get(key);
+    optionCounts.set(key, {
+      count: (existing?.count ?? 0) + 1,
+      vote,
+    });
+  }
+
+  if (optionCounts.size === 0) {
+    throw new Error("Game action failed.");
+  }
+
+  const highest = Math.max(...Array.from(optionCounts.values()).map((option) => option.count));
+  const tiedOptions = Array.from(optionCounts.values()).filter((option) => option.count === highest);
+  const winningOption = tiedOptions.length > 1 ? randomChoice(tiedOptions) : tiedOptions[0];
+  const tieMessage =
+    tiedOptions.length > 1
+      ? `由于最高票选项票数相同，随机选择了${winningOption.vote.type === "skip" ? "不猜" : `猜「${winningOption.vote.answerText}」`}。`
+      : "";
+
+  if (winningOption.vote.type === "skip") {
+    const nextTeam = getOpposingTeam(state.activeTeam);
+    const nextPhase = session.revealedBlocks.length >= REVEAL_BLOCK_COUNT ? "GUESS_VOTE" : "REVEAL_VOTE";
+    const nextState: TeamBattleState = {
+      ...state,
+      activeTeam: nextTeam,
+      phase: nextPhase,
+      revealLimit: 1,
+      voteDeadlineAt: null,
+      revealVotes: {},
+      guessVotes: {},
+      pendingGuess: null,
+      turnNumber: state.turnNumber + 1,
+      message:
+        nextPhase === "REVEAL_VOTE"
+          ? `${getTeamName(state.activeTeam)}选择不猜，轮到${getTeamName(nextTeam)}揭露 1 个方块。${tieMessage}`
+          : `${getTeamName(state.activeTeam)}选择不猜，图片已全部揭露，轮到${getTeamName(nextTeam)}决定是否猜测。${tieMessage}`,
+    };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+      current_reveal_round: currentGameSession.current_reveal_round + 1,
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { gameSession: toGameSession(updatedGameSession) };
+  }
+
+  const answerText = winningOption.vote.answerText?.trim() ?? "";
+  const nextState: TeamBattleState = {
+    ...state,
+    phase: "JUDGING",
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: {
+      team: state.activeTeam,
+      answerText,
+    },
+    message: `${getTeamName(state.activeTeam)}决定猜「${answerText}」。${tieMessage}`,
+  };
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { gameSession: toGameSession(updatedGameSession) };
+}
+
+export async function judgeTeamBattleGuess(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  isCorrect: boolean;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("Game action failed.");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+
+  if (state.phase !== "JUDGING" || !state.pendingGuess) {
+    throw new Error("Game action failed.");
+  }
+
+  if (!params.isCorrect) {
+    const nextTeam = getOpposingTeam(state.pendingGuess.team);
+    const nextPhase = session.revealedBlocks.length >= REVEAL_BLOCK_COUNT ? "GUESS_VOTE" : "REVEAL_VOTE";
+    const nextState: TeamBattleState = {
+      ...state,
+      activeTeam: nextTeam,
+      phase: nextPhase,
+      revealLimit: 2,
+      voteDeadlineAt: null,
+      revealVotes: {},
+      guessVotes: {},
+      pendingGuess: null,
+      turnNumber: state.turnNumber + 1,
+      message:
+        nextPhase === "REVEAL_VOTE"
+          ? `${getTeamName(state.pendingGuess.team)}猜错，${getTeamName(nextTeam)}本回合可以揭露 2 个方块。`
+          : `${getTeamName(state.pendingGuess.team)}猜错，图片已全部揭露，轮到${getTeamName(nextTeam)}决定是否猜测。`,
+    };
+    const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+      current_reveal_round: currentGameSession.current_reveal_round + 1,
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { gameSession: toGameSession(updatedGameSession) };
+  }
+
+  const winningTeam = state.pendingGuess.team;
+  const winningMembers = getTeamMembers(state, winningTeam);
+  const nextScores = {
+    ...state.teamScores,
+    [winningTeam]: state.teamScores[winningTeam] + 1,
+  };
+
+  for (const scoredPlayerId of winningMembers) {
+    const { error: resultError } = await d1.from("question_results").insert({
+      game_session_id: currentGameSession.id,
+      question_index: currentGameSession.current_question_index,
+      player_id: scoredPlayerId,
+      scored_round: currentGameSession.current_reveal_round,
+      score_awarded: 1,
+      judged_by_player_id: params.presenterPlayerId,
+    });
+
+    if (resultError && !isUniqueViolation(resultError)) {
+      throw new Error(resultError.message);
+    }
+
+    if (!resultError) {
+      await addScoreToPlayer({
+        gameSessionId: currentGameSession.id,
+        playerId: scoredPlayerId,
+        scoreAwarded: 1,
+      });
+    }
+  }
+
+  const nextState: TeamBattleState = {
+    ...state,
+    phase: "REVIEW",
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+    teamScores: nextScores,
+    message: `${getTeamName(winningTeam)}猜对并获得 1 分，当前展示完整图片。`,
+  };
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+    revealed_blocks: ALL_REVEALED_BLOCKS,
+    round_started_at: null,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { gameSession: toGameSession(updatedGameSession) };
+}
+
+export async function revealTeamBattleAnswer(params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error: currentError } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("presenter_player_id", params.presenterPlayerId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("Game action failed.");
+  }
+
+  const session = assertTeamBattleSession(currentGameSession);
+  const state = session.teamBattleState!;
+  const nextState: TeamBattleState = {
+    ...state,
+    phase: "REVIEW",
+    voteDeadlineAt: null,
+    revealVotes: {},
+    guessVotes: {},
+    pendingGuess: null,
+    message: "出题人公布答案，本题双方都不加分。",
+  };
+  const { data: updatedGameSession, error } = await updateTeamBattleState(currentGameSession.id, nextState, {
+    revealed_blocks: ALL_REVEALED_BLOCKS,
+    round_started_at: null,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { gameSession: toGameSession(updatedGameSession) };
+}
+
 export async function gradeAnswersAndAdvance(params: {
   gameSessionId: string;
   presenterPlayerId: string;
@@ -2041,6 +2696,9 @@ export async function advanceReviewedQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
+      team_battle_state: currentSession.gameMode === "TEAM_BATTLE" && currentSession.teamBattleState
+        ? resetTeamBattleStateForQuestion(currentSession.teamBattleState)
+        : null,
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)
@@ -2265,6 +2923,9 @@ export async function skipCurrentQuestion(params: {
       current_question_index: nextQuestionIndex,
       current_reveal_round: 1,
       revealed_blocks: [],
+      team_battle_state: toGameSession(currentGameSession).gameMode === "TEAM_BATTLE" && toGameSession(currentGameSession).teamBattleState
+        ? resetTeamBattleStateForQuestion(toGameSession(currentGameSession).teamBattleState)
+        : null,
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)

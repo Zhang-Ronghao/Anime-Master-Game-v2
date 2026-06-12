@@ -14,6 +14,7 @@ import type {
   QuestionResult,
   QuestionSet,
   Room,
+  TeamBattleGuessVote,
 } from "@/types/game";
 
 export type QuestionImportItem = {
@@ -258,6 +259,21 @@ export const judgeBuzzerAnswer = (params: {
 
 export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
   rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
+
+export const submitTeamBattleRevealVote = (params: { gameSessionId: string; playerId: string; selectedBlocks: number[] }) =>
+  rpc<GameSession>("submitTeamBattleRevealVote", params);
+
+export const submitTeamBattleGuessVote = (params: { gameSessionId: string; playerId: string; vote: TeamBattleGuessVote }) =>
+  rpc<GameSession>("submitTeamBattleGuessVote", params);
+
+export const finalizeTeamBattleVote = (params: { gameSessionId: string }) =>
+  rpc<{ gameSession: GameSession }>("finalizeTeamBattleVote", params);
+
+export const judgeTeamBattleGuess = (params: { gameSessionId: string; presenterPlayerId: string; isCorrect: boolean }) =>
+  rpc<{ gameSession: GameSession }>("judgeTeamBattleGuess", params);
+
+export const revealTeamBattleAnswer = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+  rpc<{ gameSession: GameSession }>("revealTeamBattleAnswer", params);
 
 export const gradeAnswersAndAdvance = (params: {
   gameSessionId: string;
