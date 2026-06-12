@@ -1,0 +1,287 @@
+﻿"use client";
+
+import { callGameRpc } from "@/lib/cloudflareClient";
+import type {
+  Answer,
+  BuzzerAnswer,
+  DbRoom,
+  GameMode,
+  GameSession,
+  LeaderboardEntry,
+  Player,
+  PlayerScore,
+  Question,
+  QuestionResult,
+  QuestionSet,
+  Room,
+} from "@/types/game";
+
+export type QuestionImportItem = {
+  imageUrl: string;
+  labelText?: string | null;
+};
+
+function isHttpImageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function parseImageUrlsText(imageUrlsText: string) {
+  return Array.from(
+    new Set(
+      imageUrlsText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && isHttpImageUrl(line)),
+    ),
+  );
+}
+
+function normalizeQuestionImportItems(items: QuestionImportItem[]) {
+  const seenUrls = new Set<string>();
+  const normalizedItems: QuestionImportItem[] = [];
+
+  for (const item of items) {
+    const imageUrl = item.imageUrl.trim();
+    if (!imageUrl || !isHttpImageUrl(imageUrl) || seenUrls.has(imageUrl)) {
+      continue;
+    }
+
+    seenUrls.add(imageUrl);
+    normalizedItems.push({
+      imageUrl,
+      labelText: item.labelText?.trim() || null,
+    });
+  }
+
+  return normalizedItems;
+}
+
+export function parseQuestionImportText(importText: string): QuestionImportItem[] {
+  const items: QuestionImportItem[] = [];
+
+  for (const [index, rawLine] of importText.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    if (!line.startsWith("{")) {
+      if (isHttpImageUrl(line)) {
+        items.push({ imageUrl: line });
+      }
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`第 ${index + 1} 行不是有效 JSON。`);
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error(`第 ${index + 1} 行必须是 JSON 对象。`);
+    }
+
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.image_url !== "string" || !isHttpImageUrl(record.image_url.trim())) {
+      throw new Error(`第 ${index + 1} 行缺少有效的 image_url。`);
+    }
+    if (record.label_text != null && typeof record.label_text !== "string") {
+      throw new Error(`第 ${index + 1} 行的 label_text 必须是字符串。`);
+    }
+
+    items.push({
+      imageUrl: record.image_url,
+      labelText: typeof record.label_text === "string" ? record.label_text : null,
+    });
+  }
+
+  return normalizeQuestionImportItems(items);
+}
+
+const rpc = <T>(name: string, ...args: unknown[]) => callGameRpc<T>(name, args);
+
+export const createRoom = (playerId: string, nickname: string) => rpc<Room>("createRoom", playerId, nickname);
+
+export const getRoomByCode = (roomCode: string) => rpc<DbRoom | null>("getRoomByCode", roomCode);
+
+export const getRoomWithPlayers = (roomCode: string) => rpc<Room | null>("getRoomWithPlayers", roomCode);
+
+export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersByRoomId", roomId);
+
+export const joinRoom = (roomCode: string, playerId: string, nickname: string) =>
+  rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname);
+
+export const leaveRoom = (roomId: string, playerId: string) => rpc<void>("leaveRoom", roomId, playerId);
+
+export const dissolveRoom = (roomId: string, playerId: string) => rpc<void>("dissolveRoom", roomId, playerId);
+
+export function dissolveRoomOnPageExit(roomId: string, playerId: string) {
+  try {
+    void fetch(`${(process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "")}/api/rpc`, {
+      method: "POST",
+      keepalive: true,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "dissolveRoom", args: [roomId, playerId] }),
+    });
+  } catch {
+    // Page-exit cleanup is best effort.
+  }
+}
+
+export const selectPresenterForRound = (roomId: string, hostPlayerId: string, presenterPlayerId: string) =>
+  rpc<Room>("selectPresenterForRound", roomId, hostPlayerId, presenterPlayerId);
+
+export const cancelCurrentRound = (roomId: string, hostPlayerId: string) =>
+  rpc<Room>("cancelCurrentRound", roomId, hostPlayerId);
+
+export const createUploadedQuestionSet = (params: {
+  roomId: string;
+  presenterPlayerId: string;
+  title: string;
+  description?: string;
+  imageUrls?: string[];
+  questions?: QuestionImportItem[];
+}) => rpc<QuestionSet>("createUploadedQuestionSet", params);
+
+export const createQuestionSetFromUrlText = (params: {
+  roomId: string;
+  presenterPlayerId: string;
+  title: string;
+  description?: string;
+  imageUrlsText: string;
+}) => rpc<QuestionSet>("createQuestionSetFromUrlText", params);
+
+export const getQuestionSetById = (questionSetId: string) =>
+  rpc<QuestionSet | null>("getQuestionSetById", questionSetId);
+
+export const getCommunityQuestionSets = (sort: "latest" | "rating" = "latest") =>
+  rpc<QuestionSet[]>("getCommunityQuestionSets", sort);
+
+export const prepareQuestionSetForStart = (params: {
+  roomId: string;
+  presenterPlayerId: string;
+  questionSetId: string;
+}) => rpc<Room>("prepareQuestionSetForStart", params);
+
+export const startGameWithQuestionSet = (params: {
+  roomId: string;
+  hostPlayerId: string;
+  presenterPlayerId: string;
+  questionSetId: string;
+  gameMode?: GameMode;
+  maxRevealRounds?: number;
+  roundSeconds?: number;
+  roundScores?: number[];
+}) => rpc<{ gameSession: GameSession; room: Room }>("startGameWithQuestionSet", params);
+
+export const getGameSessionById = (gameSessionId: string) =>
+  rpc<GameSession | null>("getGameSessionById", gameSessionId);
+
+export const getQuestionsByQuestionSetId = (questionSetId: string) =>
+  rpc<Question[]>("getQuestionsByQuestionSetId", questionSetId);
+
+export const confirmRevealBlocks = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  selectedBlocks: number[];
+}) => rpc<GameSession>("confirmRevealBlocks", params);
+
+export const getAnswersForQuestionRound = (params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+}) => rpc<Answer[]>("getAnswersForQuestionRound", params);
+
+export const getAnswersForQuestion = (params: { gameSessionId: string; questionIndex: number }) =>
+  rpc<Answer[]>("getAnswersForQuestion", params);
+
+export const getAnswerForPlayerRound = (params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+}) => rpc<Answer | null>("getAnswerForPlayerRound", params);
+
+export const getBuzzerAnswersForQuestionRound = (params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+}) => rpc<BuzzerAnswer[]>("getBuzzerAnswersForQuestionRound", params);
+
+export const getBuzzerAnswersForQuestion = (params: { gameSessionId: string; questionIndex: number }) =>
+  rpc<BuzzerAnswer[]>("getBuzzerAnswersForQuestion", params);
+
+export const getBuzzerAnswerForPlayerRound = (params: {
+  gameSessionId: string;
+  questionIndex: number;
+  revealRound: number;
+  playerId: string;
+}) => rpc<BuzzerAnswer | null>("getBuzzerAnswerForPlayerRound", params);
+
+export const getPlayerScores = (gameSessionId: string) => rpc<PlayerScore[]>("getPlayerScores", gameSessionId);
+
+export const getLeaderboardForGameSession = (gameSessionId: string) =>
+  rpc<LeaderboardEntry[]>("getLeaderboardForGameSession", gameSessionId);
+
+export const publishQuestionSetToCommunity = (params: {
+  questionSetId: string;
+  playerId: string;
+  title: string;
+  description?: string;
+}) => rpc<QuestionSet>("publishQuestionSetToCommunity", params);
+
+export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number }) =>
+  rpc<QuestionSet>("rateCommunityQuestionSet", params);
+
+export const getQuestionResultsForQuestion = (params: { gameSessionId: string; questionIndex: number }) =>
+  rpc<QuestionResult[]>("getQuestionResultsForQuestion", params);
+
+export const submitAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
+  rpc<Answer>("submitAnswer", params);
+
+export const submitBuzzerAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
+  rpc<BuzzerAnswer>("submitBuzzerAnswer", params);
+
+export const judgeBuzzerAnswer = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  buzzerAnswerId: string;
+  isCorrect: boolean;
+}) => rpc<{ gameSession: GameSession; judgedAnswer: BuzzerAnswer }>("judgeBuzzerAnswer", params);
+
+export const settleBuzzerRound = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+  rpc<{ gameSession: GameSession }>("settleBuzzerRound", params);
+
+export const gradeAnswersAndAdvance = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  correctPlayerIds: string[];
+}) => rpc<{ gameSession: GameSession; room: Room | null; newlyScoredPlayerIds: string[] }>("gradeAnswersAndAdvance", params);
+
+export const advanceReviewedQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+  rpc<{ gameSession: GameSession; room: Room | null }>("advanceReviewedQuestion", params);
+
+export const updateQuestionLabel = (params: {
+  gameSessionId: string;
+  presenterPlayerId: string;
+  questionId: string;
+  labelText: string;
+  source: "manual" | "answer";
+  answerId?: string | null;
+}) => rpc<Question>("updateQuestionLabel", params);
+
+export const skipCurrentQuestion = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+  rpc<{ gameSession: GameSession; room: Room | null }>("skipCurrentQuestion", params);
+
+export const endCurrentGameEarly = (params: { gameSessionId: string; presenterPlayerId: string }) =>
+  rpc<{ gameSession: GameSession; room: Room }>("endCurrentGameEarly", params);
+
+export const returnRoomToLobby = (roomId: string, hostPlayerId: string) =>
+  rpc<Room>("returnRoomToLobby", roomId, hostPlayerId);

@@ -18,7 +18,7 @@ import {
   parseImageUrlsText,
   parseQuestionImportText,
   prepareQuestionSetForStart,
-} from "@/lib/supabaseRooms";
+} from "@/lib/cloudflareRooms";
 import type { QuestionSet, Room } from "@/types/game";
 
 type QuestionSetUploaderProps = {
@@ -673,7 +673,6 @@ export function QuestionSetUploader({
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                 {getQuestionSetPreviewItems(previewingCommunitySet).map((item) => (
                   <figure className="rounded-md border border-[var(--line)] bg-slate-50 p-2" key={item.key}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
                     <figcaption className="mt-2 text-xs text-[var(--muted)]">
                       第 {item.index + 1} 张
@@ -703,7 +702,6 @@ export function QuestionSetUploader({
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
             {previewItems.slice(0, 12).map((item) => (
               <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
                 <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写标签"}>
                   {item.labelText?.trim() || "未填写标签"}
@@ -714,7 +712,6 @@ export function QuestionSetUploader({
               ? results.slice(0, 12).map((result) =>
                   result.ok ? (
                     <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
                       <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写标签</figcaption>
                     </figure>

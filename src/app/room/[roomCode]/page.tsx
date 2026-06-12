@@ -1,32 +1,32 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
 import { ImageRevealGame } from "@/components/ImageRevealGame";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { QuestionSetUploader } from "@/components/QuestionSetUploader";
+import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import { clearLocalRoomSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
-import { supabase } from "@/lib/supabaseClient";
 import {
   cancelCurrentRound,
-  dissolveSupabaseRoom,
+  dissolveRoom,
   getGameSessionById,
   getLeaderboardForGameSession,
   getPlayersByRoomId,
   getQuestionSetById,
   getRoomByCode,
-  joinSupabaseRoom,
-  leaveSupabaseRoom,
+  joinRoom,
+  leaveRoom,
   publishQuestionSetToCommunity,
   rateCommunityQuestionSet,
   returnRoomToLobby,
   selectPresenterForRound,
   startGameWithQuestionSet,
-} from "@/lib/supabaseRooms";
-import type { DbRoom, GameMode, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
+} from "@/lib/cloudflareRooms";
+import type { GameMode, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -42,27 +42,47 @@ type GameSettings = {
   roundScores: number[];
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRoom(value: unknown): value is Room {
+  return isRecord(value) && typeof value.code === "string" && typeof value.status === "string";
+}
+
+function isQuestionSet(value: unknown): value is QuestionSet {
+  return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && "imageCount" in value;
+}
+
+function getBroadcastRoom(result: unknown) {
+  if (isRoom(result)) {
+    return result;
+  }
+
+  if (isRecord(result) && isRoom(result.room)) {
+    return result.room;
+  }
+
+  return null;
+}
+
+function getBroadcastQuestionSet(result: unknown) {
+  if (isQuestionSet(result)) {
+    return result;
+  }
+
+  if (isRecord(result) && isQuestionSet(result.questionSet)) {
+    return result.questionSet;
+  }
+
+  return null;
+}
+
 const gameModeText: Record<GameMode, string> = {
   ROUND_REVEAL: "轮揭竞答模式",
   BUZZER_FIRST_CORRECT: "抢答模式 - 首答制",
   BUZZER_RANKED: "抢答模式 - 排名得分制",
 };
-
-function applyRoomMeta(currentRoom: Room | null, dbRoom: DbRoom): Room | null {
-  if (!currentRoom) {
-    return currentRoom;
-  }
-
-  return {
-    ...currentRoom,
-    hostPlayerId: dbRoom.host_player_id,
-    status: dbRoom.game_status,
-    currentPresenterPlayerId: dbRoom.current_presenter_player_id,
-    currentGameId: dbRoom.current_game_id,
-    preparedQuestionSetId: dbRoom.prepared_question_set_id ?? null,
-    updatedAt: dbRoom.updated_at,
-  };
-}
 
 function getPresenterName(players: Player[], presenterPlayerId?: string | null) {
   return players.find((player) => player.id === presenterPlayerId)?.nickname ?? "未选择";
@@ -306,35 +326,27 @@ function GameResultPanel({
       return;
     }
 
-    const channel = supabase
-      .channel(`question-set:${questionSet.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "question_sets",
-          filter: `id=eq.${questionSet.id}`,
-        },
-        () => {
-          getQuestionSetById(questionSet.id)
-            .then((nextQuestionSet) => {
-              if (nextQuestionSet) {
-                setQuestionSet(nextQuestionSet);
-                setPublishTitle(nextQuestionSet.title);
-                setPublishDescription(nextQuestionSet.description ?? "");
-              }
-            })
-            .catch((caughtError) => {
-              onError(caughtError instanceof Error ? caughtError.message : "刷新题库状态失败。");
-            });
-        },
-      )
-      .subscribe();
+    return subscribeRealtimeTopic(`question-set:${questionSet.id}`, (message) => {
+      const pushedQuestionSet = getBroadcastQuestionSet(message.result);
+      if (pushedQuestionSet?.id === questionSet.id) {
+        setQuestionSet(pushedQuestionSet);
+        setPublishTitle(pushedQuestionSet.title);
+        setPublishDescription(pushedQuestionSet.description ?? "");
+        return;
+      }
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+      getQuestionSetById(questionSet.id)
+        .then((nextQuestionSet) => {
+          if (nextQuestionSet) {
+            setQuestionSet(nextQuestionSet);
+            setPublishTitle(nextQuestionSet.title);
+            setPublishDescription(nextQuestionSet.description ?? "");
+          }
+        })
+        .catch((caughtError) => {
+          onError(caughtError instanceof Error ? caughtError.message : "刷新题库状态失败。");
+        });
+    });
   }, [onError, questionSet?.id]);
 
   async function handlePublishQuestionSet() {
@@ -548,7 +560,7 @@ export default function RoomPage() {
       }
 
       try {
-        const joined = await joinSupabaseRoom(roomCode, session.playerId, session.nickname);
+        const joined = await joinRoom(roomCode, session.playerId, session.nickname);
 
         if (joined.error || !joined.room) {
           if (isMounted) {
@@ -597,98 +609,66 @@ export default function RoomPage() {
       setError("房间已被房主解散。");
     }
 
-    async function checkRoomStillExists() {
+    async function refreshRoom() {
+      if (!room?.id) {
+        return;
+      }
+
       const latestRoom = await getRoomByCode(roomCode);
 
       if (!latestRoom) {
         markRoomDissolved();
-        return false;
-      }
-
-      return true;
-    }
-
-    async function refreshPlayers() {
-      if (!room?.id) {
         return;
       }
 
       const players = await getPlayersByRoomId(room.id);
 
       if (!players.some((player) => player.id === playerId)) {
-        const roomExists = await checkRoomStillExists();
-
-        if (!roomExists) {
-          return;
-        }
+        markRoomDissolved();
+        return;
       }
 
-      setRoom((currentRoom) => (currentRoom ? { ...currentRoom, players } : currentRoom));
-    }
-
-    const channel = supabase
-      .channel(`room:${room.id}:players`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "players",
-          filter: `room_id=eq.${room.id}`,
-        },
-        async (payload) => {
-          if (payload.eventType === "DELETE" && payload.old.id === playerId) {
-            const roomExists = await checkRoomStillExists();
-
-            if (!roomExists) {
-              return;
+      setRoom((currentRoom) =>
+        currentRoom
+          ? {
+              ...currentRoom,
+              hostPlayerId: latestRoom.host_player_id,
+              status: latestRoom.game_status,
+              currentPresenterPlayerId: latestRoom.current_presenter_player_id,
+              currentGameId: latestRoom.current_game_id,
+              preparedQuestionSetId: latestRoom.prepared_question_set_id ?? null,
+              updatedAt: latestRoom.updated_at,
+              players,
             }
-          }
-
-          refreshPlayers().catch((caughtError) => {
-            setError(caughtError instanceof Error ? caughtError.message : "刷新玩家列表失败。");
-          });
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [playerId, room?.id, roomCode]);
-
-  useEffect(() => {
-    if (!room?.id) {
-      return;
+          : currentRoom,
+      );
     }
 
-    const channel = supabase
-      .channel(`room:${room.id}:meta`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "rooms",
-          filter: `id=eq.${room.id}`,
-        },
-        (payload) => {
-          if (payload.eventType === "DELETE") {
-            clearLocalRoomSession();
-            setRoom(null);
-            setError("房间已被房主解散。");
-            return;
-          }
+    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
+      const pushedRoom = getBroadcastRoom(message.result);
+      if (pushedRoom && pushedRoom.id === room.id) {
+        if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
+          markRoomDissolved();
+          return;
+        }
 
-          setRoom((currentRoom) => applyRoomMeta(currentRoom, payload.new as DbRoom));
-        },
-      )
-      .subscribe();
+        setRoom((currentRoom) =>
+          currentRoom
+            ? {
+                ...currentRoom,
+                ...pushedRoom,
+                players: pushedRoom.players.length > 0 ? pushedRoom.players : currentRoom.players,
+              }
+            : pushedRoom,
+        );
+        return;
+      }
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [room?.id]);
+      refreshRoom().catch((caughtError) => {
+        setError(caughtError instanceof Error ? caughtError.message : "刷新房间状态失败。");
+      });
+    });
+  }, [playerId, room?.id, roomCode]);
 
   const currentPlayer = useMemo(
     () => room?.players.find((player) => player.id === playerId) ?? null,
@@ -704,9 +684,9 @@ export default function RoomPage() {
     try {
       if (room?.id && playerId) {
         if (isHost) {
-          await dissolveSupabaseRoom(room.id, playerId);
+          await dissolveRoom(room.id, playerId);
         } else {
-          await leaveSupabaseRoom(room.id, playerId);
+          await leaveRoom(room.id, playerId);
         }
       }
     } catch (caughtError) {
@@ -733,7 +713,7 @@ export default function RoomPage() {
     setError("");
 
     try {
-      await dissolveSupabaseRoom(room.id, playerId);
+      await dissolveRoom(room.id, playerId);
       clearLocalRoomSession();
       router.push("/");
     } catch (caughtError) {
@@ -861,7 +841,7 @@ export default function RoomPage() {
 
       {isLoading ? (
         <Panel title="加载房间">
-          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Supabase 读取房间和玩家列表...</p>
+          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Cloudflare API 读取房间和玩家列表...</p>
         </Panel>
       ) : !room ? (
         <Panel title="无法加载房间">

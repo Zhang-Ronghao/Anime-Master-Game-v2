@@ -1,7 +1,5 @@
-"use client";
-
-import { createRoomCode } from "@/lib/id";
-import { assertSupabaseEnv, getSupabasePublicConfig, supabase } from "@/lib/supabaseClient";
+﻿import { createRoomCode } from "../src/lib/id";
+import { createD1QueryClient } from "./d1QueryCompat";
 import type {
   Answer,
   BuzzerAnswer,
@@ -23,7 +21,23 @@ import type {
   QuestionResult,
   QuestionSet,
   Room,
-} from "@/types/game";
+} from "../src/types/game";
+
+let d1 = createD1QueryClient(null);
+
+export function bindGameDatabase(db: D1Database) {
+  d1 = createD1QueryClient(db);
+}
+
+function assertD1Env() {
+  if (!d1.hasDatabase()) {
+    throw new Error("Game action failed.");
+  }
+}
+
+function getD1PublicConfig(): never {
+  throw new Error("Game action failed.");
+}
 
 function toPlayer(player: DbPlayer): Player {
   return {
@@ -250,21 +264,21 @@ export function parseQuestionImportText(importText: string): QuestionImportItem[
     try {
       parsed = JSON.parse(line);
     } catch {
-      throw new Error(`第 ${index + 1} 行不是有效 JSON。`);
+      throw new Error(`Line ${index + 1} is not valid JSON.`);
     }
 
     if (!parsed || typeof parsed !== "object") {
-      throw new Error(`第 ${index + 1} 行必须是 JSON 对象。`);
+      throw new Error(`Line ${index + 1} must be a JSON object.`);
     }
 
     const record = parsed as Record<string, unknown>;
 
     if (typeof record.image_url !== "string" || !isHttpImageUrl(record.image_url.trim())) {
-      throw new Error(`第 ${index + 1} 行缺少有效的 image_url。`);
+      throw new Error(`Line ${index + 1} is missing a valid image_url.`);
     }
 
     if (record.label_text != null && typeof record.label_text !== "string") {
-      throw new Error(`第 ${index + 1} 行的 label_text 必须是字符串。`);
+      throw new Error(`Line ${index + 1} label_text must be a string.`);
     }
 
     const labelText = typeof record.label_text === "string" ? record.label_text : null;
@@ -282,13 +296,13 @@ function imageUrlsToText(imageUrls: string[]) {
   return imageUrls.map((url) => url.trim()).filter(Boolean).join("\n");
 }
 
-export async function createSupabaseRoom(playerId: string, nickname: string) {
-  assertSupabaseEnv();
+export async function createRoom(playerId: string, nickname: string) {
+  assertD1Env();
 
   let roomCode = createRoomCode();
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const { data: room, error: roomError } = await supabase
+    const { data: room, error: roomError } = await d1
       .from("rooms")
       .insert({
         room_code: roomCode,
@@ -306,7 +320,7 @@ export async function createSupabaseRoom(playerId: string, nickname: string) {
       throw new Error(roomError.message);
     }
 
-    const { error: playerError } = await supabase.from("players").upsert(
+    const { error: playerError } = await d1.from("players").upsert(
       {
         id: playerId,
         room_id: room.id,
@@ -333,13 +347,13 @@ export async function createSupabaseRoom(playerId: string, nickname: string) {
     ]);
   }
 
-  throw new Error("生成房间号失败，请重试。");
+  throw new Error("Game action failed.");
 }
 
 export async function getRoomByCode(roomCode: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: room, error } = await supabase
+  const { data: room, error } = await d1
     .from("rooms")
     .select("*")
     .eq("room_code", roomCode)
@@ -364,9 +378,9 @@ export async function getRoomWithPlayers(roomCode: string) {
 }
 
 async function getDbPlayersByRoomId(roomId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("players")
     .select("*")
     .eq("room_id", roomId)
@@ -385,13 +399,13 @@ export async function getPlayersByRoomId(roomId: string) {
   return players.map(toPlayer);
 }
 
-export async function joinSupabaseRoom(roomCode: string, playerId: string, nickname: string) {
+export async function joinRoom(roomCode: string, playerId: string, nickname: string) {
   const room = await getRoomByCode(roomCode);
 
   if (!room) {
     return {
       room: null,
-      error: "房间不存在。请检查房间号是否正确。",
+      error: "Game action failed.",
     };
   }
 
@@ -403,7 +417,7 @@ export async function joinSupabaseRoom(roomCode: string, playerId: string, nickn
   if (duplicatedNickname) {
     return {
       room: null,
-      error: "该昵称已在房间中使用，请换一个昵称。",
+      error: "Game action failed.",
     };
   }
 
@@ -412,12 +426,12 @@ export async function joinSupabaseRoom(roomCode: string, playerId: string, nickn
   if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
     return {
       room: null,
-      error: `房间人数已满，最多 ${MAX_PLAYERS_PER_ROOM} 人。`,
+      error: `Room is full. Maximum ${MAX_PLAYERS_PER_ROOM} players.`,
     };
   }
 
   const isHost = room.host_player_id === playerId;
-  const { error } = await supabase.from("players").upsert(
+  const { error } = await d1.from("players").upsert(
     {
       id: playerId,
       room_id: room.id,
@@ -432,7 +446,7 @@ export async function joinSupabaseRoom(roomCode: string, playerId: string, nickn
     if (isUniqueViolation(error)) {
       return {
         room: null,
-        error: "该昵称已在房间中使用，请换一个昵称。",
+        error: "Game action failed.",
       };
     }
 
@@ -447,10 +461,10 @@ export async function joinSupabaseRoom(roomCode: string, playerId: string, nickn
   };
 }
 
-export async function leaveSupabaseRoom(roomId: string, playerId: string) {
-  assertSupabaseEnv();
+export async function leaveRoom(roomId: string, playerId: string) {
+  assertD1Env();
 
-  const { error } = await supabase
+  const { error } = await d1
     .from("players")
     .delete()
     .eq("room_id", roomId)
@@ -462,10 +476,10 @@ export async function leaveSupabaseRoom(roomId: string, playerId: string) {
   }
 }
 
-export async function dissolveSupabaseRoom(roomId: string, playerId: string) {
-  assertSupabaseEnv();
+export async function dissolveRoom(roomId: string, playerId: string) {
+  assertD1Env();
 
-  const { error } = await supabase
+  const { error } = await d1
     .from("rooms")
     .delete()
     .eq("id", roomId)
@@ -476,10 +490,10 @@ export async function dissolveSupabaseRoom(roomId: string, playerId: string) {
   }
 }
 
-export function dissolveSupabaseRoomOnPageExit(roomId: string, playerId: string) {
+export function dissolveRoomOnPageExit(roomId: string, playerId: string) {
   try {
-    const { supabaseUrl, supabaseAnonKey } = getSupabasePublicConfig();
-    const url = new URL(`${supabaseUrl}/rest/v1/rooms`);
+    const { d1Url, d1AnonKey } = getD1PublicConfig();
+    const url = new URL(`${d1Url}/rest/v1/rooms`);
     url.searchParams.set("id", `eq.${roomId}`);
     url.searchParams.set("host_player_id", `eq.${playerId}`);
 
@@ -487,20 +501,20 @@ export function dissolveSupabaseRoomOnPageExit(roomId: string, playerId: string)
       method: "DELETE",
       keepalive: true,
       headers: {
-        apikey: supabaseAnonKey,
-        Authorization: `Bearer ${supabaseAnonKey}`,
+        apikey: d1AnonKey,
+        Authorization: `Bearer ${d1AnonKey}`,
         Prefer: "return=minimal",
       },
     });
   } catch {
-    // Page-exit cleanup is best effort; explicit host navigation still awaits dissolveSupabaseRoom.
+    // Page-exit cleanup is best effort; explicit host navigation still awaits dissolveRoom.
   }
 }
 
 export async function selectPresenterForRound(roomId: string, hostPlayerId: string, presenterPlayerId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: presenter, error: presenterError } = await supabase
+  const { data: presenter, error: presenterError } = await d1
     .from("players")
     .select("id")
     .eq("room_id", roomId)
@@ -512,10 +526,10 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
   }
 
   if (!presenter) {
-    throw new Error("选择的出题人不在当前房间中。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: room, error } = await supabase
+  const { data: room, error } = await d1
     .from("rooms")
     .update({
       current_presenter_player_id: presenterPlayerId,
@@ -534,16 +548,16 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
   }
 
   if (!room) {
-    throw new Error("只有房主可以在大厅状态选择出题人。");
+    throw new Error("Game action failed.");
   }
 
   return toRoom(room);
 }
 
 export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: room, error } = await supabase
+  const { data: room, error } = await d1
     .from("rooms")
     .update({
       current_presenter_player_id: null,
@@ -561,7 +575,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
   }
 
   if (!room) {
-    throw new Error("只有房主可以取消本局。");
+    throw new Error("Game action failed.");
   }
 
   return toRoom(room);
@@ -575,7 +589,7 @@ export async function createUploadedQuestionSet(params: {
   imageUrls?: string[];
   questions?: QuestionImportItem[];
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const title = params.title.trim();
   const questionItems = normalizeQuestionImportItems(
@@ -584,14 +598,14 @@ export async function createUploadedQuestionSet(params: {
   const imageUrls = questionItems.map((item) => item.imageUrl);
 
   if (!title) {
-    throw new Error("请先输入题库标题。");
+    throw new Error("Game action failed.");
   }
 
   if (imageUrls.length === 0) {
-    throw new Error("至少需要一张上传成功的图片。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: room, error: roomError } = await supabase
+  const { data: room, error: roomError } = await d1
     .from("rooms")
     .select("*")
     .eq("id", params.roomId)
@@ -604,10 +618,10 @@ export async function createUploadedQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("只有当前出题人可以在准备题库阶段创建题库。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: questionSet, error: questionSetError } = await supabase
+  const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .insert({
       title,
@@ -625,7 +639,7 @@ export async function createUploadedQuestionSet(params: {
     throw new Error(questionSetError.message);
   }
 
-  const { data: questions, error: questionsError } = await supabase
+  const { data: questions, error: questionsError } = await d1
     .from("questions")
     .insert(
       imageUrls.map((imageUrl, index) => {
@@ -663,7 +677,7 @@ export async function createQuestionSetFromUrlText(params: {
   const questions = parseQuestionImportText(params.imageUrlsText);
 
   if (questions.length === 0) {
-    throw new Error("至少需要 1 个有效的 http/https 图片 URL。");
+    throw new Error("Game action failed.");
   }
 
   return createUploadedQuestionSet({
@@ -676,9 +690,9 @@ export async function createQuestionSetFromUrlText(params: {
 }
 
 export async function getQuestionSetById(questionSetId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: questionSet, error } = await supabase
+  const { data: questionSet, error } = await d1
     .from("question_sets")
     .select("*")
     .eq("id", questionSetId)
@@ -697,9 +711,9 @@ export async function getQuestionSetById(questionSetId: string) {
 }
 
 export async function getCommunityQuestionSets(sort: "latest" | "rating" = "latest") {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  let query = supabase.from("question_sets").select("*").eq("is_public", true);
+  let query = d1.from("question_sets").select("*").eq("is_public", true);
 
   if (sort === "rating") {
     query = query.order("rating_avg", { ascending: false }).order("rating_count", { ascending: false });
@@ -728,9 +742,9 @@ export async function prepareQuestionSetForStart(params: {
   presenterPlayerId: string;
   questionSetId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: questionSet, error: questionSetError } = await supabase
+  const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .select("*")
     .eq("id", params.questionSetId)
@@ -741,14 +755,14 @@ export async function prepareQuestionSetForStart(params: {
   }
 
   if (!questionSet || questionSet.image_count <= 0) {
-    throw new Error("题库不存在或没有图片。");
+    throw new Error("Game action failed.");
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
-    throw new Error("只能使用自己创建的题库或公开社区题库。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: room, error } = await supabase
+  const { data: room, error } = await d1
     .from("rooms")
     .update({
       prepared_question_set_id: params.questionSetId,
@@ -764,7 +778,7 @@ export async function prepareQuestionSetForStart(params: {
   }
 
   if (!room) {
-    throw new Error("只有当前出题人可以通知房主题库已准备好。");
+    throw new Error("Game action failed.");
   }
 
   return toRoom(room);
@@ -780,9 +794,9 @@ export async function startGameWithQuestionSet(params: {
   roundSeconds?: number;
   roundScores?: number[];
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: room, error: roomError } = await supabase
+  const { data: room, error: roomError } = await d1
     .from("rooms")
     .select("*")
     .eq("id", params.roomId)
@@ -797,10 +811,10 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("只有房主可以在出题人准备完成后开始游戏。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: questionSet, error: questionSetError } = await supabase
+  const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .select("*")
     .eq("id", params.questionSetId)
@@ -811,11 +825,11 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!questionSet || questionSet.image_count <= 0) {
-    throw new Error("题库不存在或没有图片。");
+    throw new Error("Game action failed.");
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
-    throw new Error("只能使用自己创建的题库或公开社区题库。");
+    throw new Error("Game action failed.");
   }
 
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
@@ -826,7 +840,7 @@ export async function startGameWithQuestionSet(params: {
     return Math.max(0, Math.floor(score));
   });
 
-  const { data: gameSession, error: gameSessionError } = await supabase
+  const { data: gameSession, error: gameSessionError } = await d1
     .from("game_sessions")
     .insert({
       room_id: params.roomId,
@@ -845,7 +859,7 @@ export async function startGameWithQuestionSet(params: {
     throw new Error(gameSessionError.message);
   }
 
-  const { data: updatedRoom, error: updateRoomError } = await supabase
+  const { data: updatedRoom, error: updateRoomError } = await d1
     .from("rooms")
     .update({
       current_game_id: gameSession.id,
@@ -865,14 +879,14 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!updatedRoom) {
-    await supabase
+    await d1
       .from("game_sessions")
       .update({
         status: "GAME_RESULT",
         ended_at: new Date().toISOString(),
       })
       .eq("id", gameSession.id);
-    throw new Error("开始游戏失败，房间状态已变化。");
+    throw new Error("Game action failed.");
   }
 
   return {
@@ -882,9 +896,9 @@ export async function startGameWithQuestionSet(params: {
 }
 
 export async function getGameSessionById(gameSessionId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", gameSessionId)
@@ -898,9 +912,9 @@ export async function getGameSessionById(gameSessionId: string) {
 }
 
 async function getDbQuestionsByQuestionSetId(questionSetId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("questions")
     .select("*")
     .eq("question_set_id", questionSetId)
@@ -924,9 +938,9 @@ export async function confirmRevealBlocks(params: {
   presenterPlayerId: string;
   selectedBlocks: number[];
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -939,7 +953,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以确认揭露。");
+    throw new Error("Game action failed.");
   }
 
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
@@ -949,7 +963,7 @@ export async function confirmRevealBlocks(params: {
   const nextBlocks = Array.from(new Set([...revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
 
   if (nextBlocks.length === revealedBlocks.length) {
-    throw new Error("请先选择至少一个未揭露的块。");
+    throw new Error("Game action failed.");
   }
 
   const roundStartedAt = currentGameSession.round_started_at;
@@ -962,14 +976,14 @@ export async function confirmRevealBlocks(params: {
       : currentGameSession.current_reveal_round;
 
   if (roundStartedAt && !roundEnded) {
-    throw new Error("当前轮倒计时结束后才能确认下一轮揭露。");
+    throw new Error("Game action failed.");
   }
 
   if (currentGameSession.current_reveal_round >= maxRevealRounds && roundStartedAt && roundEnded) {
-    throw new Error("本题最多 3 轮揭露。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: updatedGameSession, error } = await supabase
+  const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       revealed_blocks: nextBlocks,
@@ -987,7 +1001,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!updatedGameSession) {
-    throw new Error("确认揭露失败，游戏状态已变化。");
+    throw new Error("Game action failed.");
   }
 
   return toGameSession(updatedGameSession);
@@ -998,9 +1012,9 @@ export async function getAnswersForQuestionRound(params: {
   questionIndex: number;
   revealRound: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1020,9 +1034,9 @@ export async function getAnswersForQuestion(params: {
   gameSessionId: string;
   questionIndex: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1043,9 +1057,9 @@ export async function getAnswerForPlayerRound(params: {
   revealRound: number;
   playerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1066,9 +1080,9 @@ export async function getBuzzerAnswersForQuestionRound(params: {
   questionIndex: number;
   revealRound: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("buzzer_answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1088,9 +1102,9 @@ export async function getBuzzerAnswersForQuestion(params: {
   gameSessionId: string;
   questionIndex: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("buzzer_answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1111,9 +1125,9 @@ export async function getBuzzerAnswerForPlayerRound(params: {
   revealRound: number;
   playerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("buzzer_answers")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1130,9 +1144,9 @@ export async function getBuzzerAnswerForPlayerRound(params: {
 }
 
 export async function getPlayerScores(gameSessionId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("player_scores")
     .select("*")
     .eq("game_session_id", gameSessionId)
@@ -1147,16 +1161,16 @@ export async function getPlayerScores(gameSessionId: string) {
 }
 
 export async function getLeaderboardForGameSession(gameSessionId: string): Promise<LeaderboardEntry[]> {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const gameSession = await getGameSessionById(gameSessionId);
 
   if (!gameSession) {
-    throw new Error("当前游戏不存在。");
+    throw new Error("Game action failed.");
   }
 
   const [{ data: players, error: playersError }, scores] = await Promise.all([
-    supabase
+    d1
       .from("players")
       .select("*")
       .eq("room_id", gameSession.roomId)
@@ -1196,15 +1210,15 @@ export async function publishQuestionSetToCommunity(params: {
   title: string;
   description?: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const title = params.title.trim();
 
   if (!title) {
-    throw new Error("请填写题库标题。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: questionSet, error } = await supabase
+  const { data: questionSet, error } = await d1
     .from("question_sets")
     .update({
       title,
@@ -1221,7 +1235,7 @@ export async function publishQuestionSetToCommunity(params: {
   }
 
   if (!questionSet) {
-    throw new Error("只有题库创建者可以发布到社区。");
+    throw new Error("Game action failed.");
   }
 
   const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
@@ -1233,11 +1247,11 @@ export async function rateCommunityQuestionSet(params: {
   playerId: string;
   rating: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const rating = Math.max(1, Math.min(5, Math.floor(params.rating)));
 
-  const { data: questionSet, error: questionSetError } = await supabase
+  const { data: questionSet, error: questionSetError } = await d1
     .from("question_sets")
     .select("*")
     .eq("id", params.questionSetId)
@@ -1249,10 +1263,10 @@ export async function rateCommunityQuestionSet(params: {
   }
 
   if (!questionSet) {
-    throw new Error("只能给公开社区题库评分。");
+    throw new Error("Game action failed.");
   }
 
-  const { error: ratingError } = await supabase.from("question_set_ratings").upsert(
+  const { error: ratingError } = await d1.from("question_set_ratings").upsert(
     {
       question_set_id: params.questionSetId,
       player_id: params.playerId,
@@ -1265,7 +1279,7 @@ export async function rateCommunityQuestionSet(params: {
     throw new Error(ratingError.message);
   }
 
-  const { data: ratings, error: ratingsLoadError } = await supabase
+  const { data: ratings, error: ratingsLoadError } = await d1
     .from("question_set_ratings")
     .select("rating")
     .eq("question_set_id", params.questionSetId)
@@ -1281,7 +1295,7 @@ export async function rateCommunityQuestionSet(params: {
       ? Math.round((ratings ?? []).reduce((total, item) => total + item.rating, 0) * 100 / ratingCount) / 100
       : 0;
 
-  const { data: updatedQuestionSet, error: updateError } = await supabase
+  const { data: updatedQuestionSet, error: updateError } = await d1
     .from("question_sets")
     .update({
       rating_avg: ratingAvg,
@@ -1303,9 +1317,9 @@ export async function getQuestionResultsForQuestion(params: {
   gameSessionId: string;
   questionIndex: number;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("question_results")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1324,7 +1338,7 @@ async function addScoreToPlayer(params: {
   playerId: string;
   scoreAwarded: number;
 }) {
-  const { data: existingScore, error: scoreLoadError } = await supabase
+  const { data: existingScore, error: scoreLoadError } = await d1
     .from("player_scores")
     .select("*")
     .eq("game_session_id", params.gameSessionId)
@@ -1335,7 +1349,7 @@ async function addScoreToPlayer(params: {
     throw new Error(scoreLoadError.message);
   }
 
-  const { error: scoreError } = await supabase.from("player_scores").upsert(
+  const { error: scoreError } = await d1.from("player_scores").upsert(
     {
       id: existingScore?.id,
       game_session_id: params.gameSessionId,
@@ -1354,7 +1368,7 @@ async function addScoreToPlayer(params: {
 }
 
 async function revealQuestionForReview(gameSessionId: string) {
-  const { data: reviewedGameSession, error } = await supabase
+  const { data: reviewedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       revealed_blocks: ALL_REVEALED_BLOCKS,
@@ -1372,7 +1386,7 @@ async function revealQuestionForReview(gameSessionId: string) {
 }
 
 async function moveToNextRevealRound(currentGameSession: DbGameSession) {
-  const { data: updatedGameSession, error } = await supabase
+  const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       current_reveal_round: currentGameSession.current_reveal_round + 1,
@@ -1400,14 +1414,14 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
 
   const [{ data: players, error: playersError }, { data: questionResults, error: resultsError }, { data: currentRoundAnswers, error: answersError }] =
     await Promise.all([
-      supabase.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
-      supabase
+      d1.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
+      d1
         .from("question_results")
         .select("*")
         .eq("game_session_id", currentGameSession.id)
         .eq("question_index", questionIndex)
         .returns<DbQuestionResult[]>(),
-      supabase
+      d1
         .from("buzzer_answers")
         .select("*")
         .eq("game_session_id", currentGameSession.id)
@@ -1464,37 +1478,37 @@ export async function submitAnswer(params: {
   playerId: string;
   answerText: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const answerText = params.answerText.trim();
 
   if (!answerText) {
-    throw new Error("请输入答案。");
+    throw new Error("Game action failed.");
   }
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (gameSession?.gameMode !== "ROUND_REVEAL") {
-    throw new Error("当前游戏是抢答模式，请使用抢答提交。");
+    throw new Error("Game action failed.");
   }
 
   if (!gameSession || gameSession.status !== "PLAYING") {
-    throw new Error("当前游戏不在答题阶段。");
+    throw new Error("Game action failed.");
   }
 
   if (gameSession.presenterPlayerId === params.playerId) {
-    throw new Error("出题人不能提交答案。");
+    throw new Error("Game action failed.");
   }
 
   if (!gameSession.roundStartedAt) {
-    throw new Error("等待出题人确认揭露后才能答题。");
+    throw new Error("Game action failed.");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("本轮倒计时已结束。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: existingResult, error: resultError } = await supabase
+  const { data: existingResult, error: resultError } = await d1
     .from("question_results")
     .select("id")
     .eq("game_session_id", gameSession.id)
@@ -1507,10 +1521,10 @@ export async function submitAnswer(params: {
   }
 
   if (existingResult) {
-    throw new Error("你已答对本题，不能继续作答。");
+    throw new Error("Game action failed.");
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("answers")
     .upsert(
       {
@@ -1540,33 +1554,33 @@ export async function submitBuzzerAnswer(params: {
   playerId: string;
   answerText: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const answerText = params.answerText.trim();
 
   if (!answerText) {
-    throw new Error("请输入答案。");
+    throw new Error("Game action failed.");
   }
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode === "ROUND_REVEAL") {
-    throw new Error("当前游戏不在抢答阶段。");
+    throw new Error("Game action failed.");
   }
 
   if (gameSession.presenterPlayerId === params.playerId) {
-    throw new Error("出题人不能抢答。");
+    throw new Error("Game action failed.");
   }
 
   if (!gameSession.roundStartedAt) {
-    throw new Error("等待出题人确认揭露后才能抢答。");
+    throw new Error("Game action failed.");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("本轮抢答时间已结束。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: existingResult, error: resultError } = await supabase
+  const { data: existingResult, error: resultError } = await d1
     .from("question_results")
     .select("id")
     .eq("game_session_id", gameSession.id)
@@ -1579,10 +1593,10 @@ export async function submitBuzzerAnswer(params: {
   }
 
   if (existingResult) {
-    throw new Error("你已答对本题，不能继续抢答。");
+    throw new Error("Game action failed.");
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await d1
     .from("buzzer_answers")
     .insert({
       game_session_id: gameSession.id,
@@ -1597,7 +1611,7 @@ export async function submitBuzzerAnswer(params: {
 
   if (error) {
     if (isUniqueViolation(error)) {
-      throw new Error("本轮你已经用过抢答机会。");
+      throw new Error("Game action failed.");
     }
 
     throw new Error(error.message);
@@ -1612,9 +1626,9 @@ export async function judgeBuzzerAnswer(params: {
   buzzerAnswerId: string;
   isCorrect: boolean;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -1627,16 +1641,16 @@ export async function judgeBuzzerAnswer(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以判定抢答。");
+    throw new Error("Game action failed.");
   }
 
   const currentSession = toGameSession(currentGameSession);
 
   if (currentSession.gameMode === "ROUND_REVEAL") {
-    throw new Error("当前游戏不是抢答模式。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: firstPendingAnswer, error: pendingError } = await supabase
+  const { data: firstPendingAnswer, error: pendingError } = await d1
     .from("buzzer_answers")
     .select("*")
     .eq("game_session_id", currentGameSession.id)
@@ -1652,7 +1666,7 @@ export async function judgeBuzzerAnswer(params: {
   }
 
   if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
-    throw new Error("请按抢答队列顺序判定。");
+    throw new Error("Game action failed.");
   }
 
   let scoreAwarded = 0;
@@ -1662,8 +1676,8 @@ export async function judgeBuzzerAnswer(params: {
       scoreAwarded = 1;
     } else {
       const [{ data: players, error: playersError }, { data: existingResults, error: resultsError }] = await Promise.all([
-        supabase.from("players").select("id").eq("room_id", currentGameSession.room_id).returns<{ id: string }[]>(),
-        supabase
+        d1.from("players").select("id").eq("room_id", currentGameSession.room_id).returns<{ id: string }[]>(),
+        d1
           .from("question_results")
           .select("id")
           .eq("game_session_id", currentGameSession.id)
@@ -1684,7 +1698,7 @@ export async function judgeBuzzerAnswer(params: {
       scoreAwarded = Math.max(1, guesserCount - correctRank + 1);
     }
 
-    const { error: resultError } = await supabase.from("question_results").insert({
+    const { error: resultError } = await d1.from("question_results").insert({
       game_session_id: currentGameSession.id,
       question_index: currentGameSession.current_question_index,
       player_id: firstPendingAnswer.player_id,
@@ -1706,7 +1720,7 @@ export async function judgeBuzzerAnswer(params: {
     }
   }
 
-  const { error: updateError } = await supabase
+  const { error: updateError } = await d1
     .from("buzzer_answers")
     .update({
       status: params.isCorrect ? "correct" : "wrong",
@@ -1739,9 +1753,9 @@ export async function settleBuzzerRound(params: {
   gameSessionId: string;
   presenterPlayerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error } = await supabase
+  const { data: currentGameSession, error } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -1754,13 +1768,13 @@ export async function settleBuzzerRound(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以结算抢答轮次。");
+    throw new Error("Game action failed.");
   }
 
   const currentSession = toGameSession(currentGameSession);
 
   if (currentSession.gameMode === "ROUND_REVEAL") {
-    throw new Error("当前游戏不是抢答模式。");
+    throw new Error("Game action failed.");
   }
 
   const roundEnded = Boolean(
@@ -1769,7 +1783,7 @@ export async function settleBuzzerRound(params: {
   );
 
   if (!roundEnded) {
-    throw new Error("本轮抢答时间结束后才能结算。");
+    throw new Error("Game action failed.");
   }
 
   const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
@@ -1784,9 +1798,9 @@ export async function gradeAnswersAndAdvance(params: {
   presenterPlayerId: string;
   correctPlayerIds: string[];
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -1799,11 +1813,11 @@ export async function gradeAnswersAndAdvance(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以判分。");
+    throw new Error("Game action failed.");
   }
 
   if (!currentGameSession.round_started_at) {
-    throw new Error("本轮还没有开始。");
+    throw new Error("Game action failed.");
   }
 
   const currentRound = currentGameSession.current_reveal_round;
@@ -1816,7 +1830,7 @@ export async function gradeAnswersAndAdvance(params: {
   const newlyScoredPlayerIds: string[] = [];
 
   for (const correctPlayerId of uniqueCorrectPlayerIds) {
-    const { error } = await supabase.from("question_results").insert({
+    const { error } = await d1.from("question_results").insert({
       game_session_id: currentGameSession.id,
       question_index: questionIndex,
       player_id: correctPlayerId,
@@ -1837,7 +1851,7 @@ export async function gradeAnswersAndAdvance(params: {
   }
 
   for (const scoredPlayerId of newlyScoredPlayerIds) {
-    const { data: existingScore, error: scoreLoadError } = await supabase
+    const { data: existingScore, error: scoreLoadError } = await d1
       .from("player_scores")
       .select("*")
       .eq("game_session_id", currentGameSession.id)
@@ -1848,7 +1862,7 @@ export async function gradeAnswersAndAdvance(params: {
       throw new Error(scoreLoadError.message);
     }
 
-    const { error: scoreError } = await supabase.from("player_scores").upsert(
+    const { error: scoreError } = await d1.from("player_scores").upsert(
       {
         id: existingScore?.id,
         game_session_id: currentGameSession.id,
@@ -1866,7 +1880,7 @@ export async function gradeAnswersAndAdvance(params: {
     }
   }
 
-  const { data: players, error: playersError } = await supabase
+  const { data: players, error: playersError } = await d1
     .from("players")
     .select("*")
     .eq("room_id", currentGameSession.room_id)
@@ -1880,7 +1894,7 @@ export async function gradeAnswersAndAdvance(params: {
     .filter((player) => player.id !== currentGameSession.presenter_player_id)
     .map((player) => player.id);
 
-  const { data: questionResults, error: questionResultsError } = await supabase
+  const { data: questionResults, error: questionResultsError } = await d1
     .from("question_results")
     .select("*")
     .eq("game_session_id", currentGameSession.id)
@@ -1897,7 +1911,7 @@ export async function gradeAnswersAndAdvance(params: {
   let nextGameSession: GameSession;
 
   if (shouldAdvanceQuestion) {
-    const { data: reviewedGameSession, error: reviewError } = await supabase
+    const { data: reviewedGameSession, error: reviewError } = await d1
       .from("game_sessions")
       .update({
         revealed_blocks: ALL_REVEALED_BLOCKS,
@@ -1913,7 +1927,7 @@ export async function gradeAnswersAndAdvance(params: {
 
     nextGameSession = toGameSession(reviewedGameSession);
   } else {
-    const { data: updatedGameSession, error: nextRoundError } = await supabase
+    const { data: updatedGameSession, error: nextRoundError } = await d1
       .from("game_sessions")
       .update({
         current_reveal_round: currentRound + 1,
@@ -1941,9 +1955,9 @@ export async function advanceReviewedQuestion(params: {
   gameSessionId: string;
   presenterPlayerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -1955,10 +1969,10 @@ export async function advanceReviewedQuestion(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("当前游戏不在进行中。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: room, error: roomLoadError } = await supabase
+  const { data: room, error: roomLoadError } = await d1
     .from("rooms")
     .select("*")
     .eq("id", currentGameSession.room_id)
@@ -1972,7 +1986,7 @@ export async function advanceReviewedQuestion(params: {
   }
 
   if (!room) {
-    throw new Error("只有当前出题人可以切换到下一张图片。");
+    throw new Error("Game action failed.");
   }
 
   const currentSession = toGameSession(currentGameSession);
@@ -1980,14 +1994,14 @@ export async function advanceReviewedQuestion(params: {
     !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
 
   if (!isReviewingQuestion) {
-    throw new Error("当前图片还没有进入完整展示阶段。");
+    throw new Error("Game action failed.");
   }
 
   const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
   const nextQuestionIndex = currentGameSession.current_question_index + 1;
 
   if (nextQuestionIndex >= questions.length) {
-    const { data: endedGameSession, error: endGameError } = await supabase
+    const { data: endedGameSession, error: endGameError } = await d1
       .from("game_sessions")
       .update({
         status: "GAME_RESULT",
@@ -2001,7 +2015,7 @@ export async function advanceReviewedQuestion(params: {
       throw new Error(endGameError.message);
     }
 
-    const { data: updatedRoom, error: roomError } = await supabase
+    const { data: updatedRoom, error: roomError } = await d1
       .from("rooms")
       .update({
         game_status: "GAME_RESULT",
@@ -2021,7 +2035,7 @@ export async function advanceReviewedQuestion(params: {
     };
   }
 
-  const { data: updatedGameSession, error } = await supabase
+  const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       current_question_index: nextQuestionIndex,
@@ -2051,15 +2065,15 @@ export async function updateQuestionLabel(params: {
   source: "manual" | "answer";
   answerId?: string | null;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
   const labelText = params.labelText.trim();
 
   if (!labelText) {
-    throw new Error("标签不能为空。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -2071,10 +2085,10 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("当前游戏不在进行中。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: room, error: roomLoadError } = await supabase
+  const { data: room, error: roomLoadError } = await d1
     .from("rooms")
     .select("*")
     .eq("id", currentGameSession.room_id)
@@ -2088,7 +2102,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!room) {
-    throw new Error("只有当前出题人可以补充图片标签。");
+    throw new Error("Game action failed.");
   }
 
   const currentSession = toGameSession(currentGameSession);
@@ -2096,10 +2110,10 @@ export async function updateQuestionLabel(params: {
     !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
 
   if (!isReviewingQuestion) {
-    throw new Error("只能在完整展示图片时补充标签。");
+    throw new Error("Game action failed.");
   }
 
-  const { data: question, error: questionError } = await supabase
+  const { data: question, error: questionError } = await d1
     .from("questions")
     .select("*")
     .eq("id", params.questionId)
@@ -2112,21 +2126,21 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!question) {
-    throw new Error("没有找到当前图片。");
+    throw new Error("Game action failed.");
   }
 
   if (question.label_text?.trim()) {
-    throw new Error("这张图片已经有标签，不能覆盖。");
+    throw new Error("Game action failed.");
   }
 
   let sourceAnswerId: string | null = null;
 
   if (params.source === "answer") {
     if (!params.answerId) {
-      throw new Error("请选择一个玩家回答作为标签。");
+      throw new Error("Game action failed.");
     }
 
-    const { data: answer, error: answerError } = await supabase
+    const { data: answer, error: answerError } = await d1
       .from("answers")
       .select("*")
       .eq("id", params.answerId)
@@ -2141,7 +2155,7 @@ export async function updateQuestionLabel(params: {
     if (answer) {
       sourceAnswerId = answer.id;
     } else {
-      const { data: buzzerAnswer, error: buzzerAnswerError } = await supabase
+      const { data: buzzerAnswer, error: buzzerAnswerError } = await d1
         .from("buzzer_answers")
         .select("*")
         .eq("id", params.answerId)
@@ -2154,14 +2168,14 @@ export async function updateQuestionLabel(params: {
       }
 
       if (!buzzerAnswer) {
-        throw new Error("没有找到这个玩家回答。");
+        throw new Error("Game action failed.");
       }
 
       sourceAnswerId = buzzerAnswer.id;
     }
   }
 
-  const { data: updatedQuestion, error: updateError } = await supabase
+  const { data: updatedQuestion, error: updateError } = await d1
     .from("questions")
     .update({
       label_text: labelText,
@@ -2180,7 +2194,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!updatedQuestion) {
-    throw new Error("标签保存失败，可能已经被其他人补充。");
+    throw new Error("Game action failed.");
   }
 
   return toQuestion(updatedQuestion);
@@ -2190,9 +2204,9 @@ export async function skipCurrentQuestion(params: {
   gameSessionId: string;
   presenterPlayerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -2205,14 +2219,14 @@ export async function skipCurrentQuestion(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以跳过本题。");
+    throw new Error("Game action failed.");
   }
 
   const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
   const nextQuestionIndex = currentGameSession.current_question_index + 1;
 
   if (nextQuestionIndex >= questions.length) {
-    const { data: endedGameSession, error: endGameError } = await supabase
+    const { data: endedGameSession, error: endGameError } = await d1
       .from("game_sessions")
       .update({
         status: "GAME_RESULT",
@@ -2226,7 +2240,7 @@ export async function skipCurrentQuestion(params: {
       throw new Error(endGameError.message);
     }
 
-    const { data: updatedRoom, error: roomError } = await supabase
+    const { data: updatedRoom, error: roomError } = await d1
       .from("rooms")
       .update({
         game_status: "GAME_RESULT",
@@ -2245,7 +2259,7 @@ export async function skipCurrentQuestion(params: {
     };
   }
 
-  const { data: updatedGameSession, error } = await supabase
+  const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       current_question_index: nextQuestionIndex,
@@ -2271,9 +2285,9 @@ export async function endCurrentGameEarly(params: {
   gameSessionId: string;
   presenterPlayerId: string;
 }) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: currentGameSession, error: currentError } = await supabase
+  const { data: currentGameSession, error: currentError } = await d1
     .from("game_sessions")
     .select("*")
     .eq("id", params.gameSessionId)
@@ -2286,11 +2300,11 @@ export async function endCurrentGameEarly(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("只有当前出题人可以提前结束本局游戏。");
+    throw new Error("Game action failed.");
   }
 
   const endedAt = new Date().toISOString();
-  const { data: endedGameSession, error: endGameError } = await supabase
+  const { data: endedGameSession, error: endGameError } = await d1
     .from("game_sessions")
     .update({
       status: "GAME_RESULT",
@@ -2305,7 +2319,7 @@ export async function endCurrentGameEarly(params: {
     throw new Error(endGameError.message);
   }
 
-  const { data: updatedRoom, error: roomError } = await supabase
+  const { data: updatedRoom, error: roomError } = await d1
     .from("rooms")
     .update({
       game_status: "GAME_RESULT",
@@ -2326,9 +2340,9 @@ export async function endCurrentGameEarly(params: {
 }
 
 export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
-  assertSupabaseEnv();
+  assertD1Env();
 
-  const { data: room, error } = await supabase
+  const { data: room, error } = await d1
     .from("rooms")
     .update({
       current_presenter_player_id: null,
@@ -2347,7 +2361,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
   }
 
   if (!room) {
-    throw new Error("只有房主可以在结算后回到房间大厅。");
+    throw new Error("Game action failed.");
   }
 
   return toRoom(room);

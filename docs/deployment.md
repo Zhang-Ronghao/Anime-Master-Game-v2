@@ -1,111 +1,144 @@
 # 部署指南
 
-本文说明如何部署自己的“动漫高手·一眼顶针”实例。
+当前架构：
 
-## 环境要求
-
-- Node.js 18
-- Supabase 项目
-- Cloudinary 账号
-- Vercel 项目
+- 前端：Cloudflare Pages
+- 后端 API + WebSocket：Cloudflare Workers
+- 房间实时通道：Durable Objects
+- 持久化：Cloudflare D1
+- 图片：Cloudinary
 
 ## 本地开发
 
 ```bash
 npm install
 cp .env.example .env.local
+npm run d1:migrate:local
+npm run worker:dev
+```
+
+另开一个终端启动前端：
+
+```bash
 npm run dev
 ```
 
-打开：
+默认地址：
 
-```text
-http://localhost:3000
-```
+- 前端：`http://localhost:3000`
+- Worker：`http://localhost:8787`
 
-## 环境变量
-
-前端公开变量：
+`.env.local` 至少需要：
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=
-NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=
-NEXT_PUBLIC_CLOUDINARY_FOLDER=anime-master-game
-NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE=960
-NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT=image/webp
-NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY=0.78
-NEXT_PUBLIC_CLOUDINARY_UPLOAD_CONCURRENCY=2
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8787
 ```
 
-服务端变量：
+如需上传图片，还需要配置 Cloudinary 相关变量。
+
+Worker 本地读取 Cloudinary 管理接口时可在 `.dev.vars` 中配置：
 
 ```env
-CLOUDINARY_API_KEY=
-CLOUDINARY_API_SECRET=
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-cloudinary-api-key
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
 CLOUDINARY_FOLDER=anime-master-game
 CLOUDINARY_EXISTING_IMAGE_LIMIT=50
 ```
 
-`CLOUDINARY_API_SECRET` 只放服务端变量，不要加 `NEXT_PUBLIC_`。
+## D1
 
-## Supabase 初始化
+创建远程 D1：
 
-在 Supabase SQL Editor 中按顺序执行：
+```bash
+npx wrangler d1 create anime_master_game
+```
 
-1. `supabase/migrations/001_rooms_players.sql`
-2. `supabase/migrations/002_question_sets_game_sessions.sql`
-3. `supabase/migrations/003_answers_scores_results.sql`
-4. `supabase/migrations/004_game_session_settings.sql`
-5. `supabase/migrations/005_community_question_sets.sql`
-6. `supabase/migrations/question-label-migration.sql`
-7. `supabase/migrations/006_prepared_question_set.sql`
+把输出的 `database_id` 填入 `wrangler.toml`：
 
-## Realtime
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "anime_master_game"
+database_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+migrations_dir = "d1/migrations"
+```
 
-需要确认这些表已加入 Realtime publication：
+执行远程迁移：
 
-- `rooms`
-- `players`
-- `question_sets`
-- `questions`
-- `game_sessions`
-- `answers`
-- `player_scores`
-- `question_results`
-- `question_set_ratings`
+```bash
+npm run d1:migrate:remote
+```
 
-迁移文件已包含 `alter publication supabase_realtime add table ...`。如果控制台里没有显示，可在 Supabase Dashboard 的 Database > Replication 中手动确认。
+## Worker
 
-## Cloudinary
+先验证打包：
 
-1. 创建 Cloudinary 账号。
-2. 创建 unsigned upload preset。
-3. 允许 unsigned browser upload。
-4. 建议设置 folder，例如 `anime-master-game`。
-5. 将 cloud name、upload preset 和 folder 写入环境变量。
+```bash
+npm run worker:typecheck
+npx wrangler deploy --dry-run
+```
 
-## Vercel
+部署：
 
-1. 将代码推送到 GitHub。
-2. 在 Vercel 新建项目并导入仓库。
-3. Framework 选择 Next.js。
-4. 在 Project Settings > Environment Variables 添加上面的环境变量。
-5. 确认 Supabase SQL 已执行。
-6. 确认 Realtime 表已开启。
-7. 确认 Cloudinary unsigned preset 可用。
-8. Deploy。
+```bash
+npm run worker:deploy
+```
+
+如果 Pages 和 Worker 不同源，更新 `wrangler.toml`：
+
+```toml
+[vars]
+ALLOWED_ORIGIN = "https://your-pages-project.pages.dev"
+```
+
+多个允许来源可用逗号分隔：
+
+```toml
+[vars]
+ALLOWED_ORIGIN = "http://localhost:3000,https://your-pages-project.pages.dev"
+```
+
+## Pages
+
+Cloudflare Pages 配置：
+
+- Framework preset: Vite
+- Build command: `npm run build`
+- Build output directory: `pages-dist`
+- Environment variable: `NEXT_PUBLIC_API_BASE_URL=<Worker URL>`
+
+如果手动部署 Pages：
+
+```bash
+npm run build
+npx wrangler pages deploy pages-dist --project-name anime-master-game-v2
+```
+
+如果使用 Cloudinary 上传，还需要配置 `.env.example` 中的 Cloudinary 变量。
+`CLOUDINARY_API_KEY` 和 `CLOUDINARY_API_SECRET` 属于服务端凭据，线上请用 Worker secrets：
+
+```bash
+npx wrangler secret put CLOUDINARY_API_KEY
+npx wrangler secret put CLOUDINARY_API_SECRET
+```
+
+非敏感配置可以放在 `wrangler.toml` 的 `[vars]` 中，或在 Cloudflare Dashboard 中设置：
+
+```toml
+[vars]
+CLOUDINARY_CLOUD_NAME = "your-cloud-name"
+CLOUDINARY_FOLDER = "anime-master-game"
+CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
+```
 
 ## 验收
 
-部署后建议用两个浏览器或无痕窗口联调：
-
 1. 创建房间。
-2. 加入同一房间。
+2. 用另一个浏览器或无痕窗口加入房间。
 3. 房主选择出题人。
-4. 出题人准备题库。
+4. 出题人创建或选择题库并通知房主。
 5. 房主开始游戏。
-6. 玩家答题。
-7. 出题人判分。
-8. 进入排行榜。
+6. 玩家答题，出题人判分。
+7. 进入排行榜。
+8. 刷新页面后确认房间和游戏状态可恢复。
