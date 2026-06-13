@@ -44,6 +44,7 @@ import type {
   QuestionResult,
   Room,
   TeamBattleGuessVote,
+  TeamBattlePhase,
   TeamBattleTeam,
 } from "@/types/game";
 
@@ -103,6 +104,42 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
 
 function getTeamName(team: TeamBattleTeam) {
   return team === "red" ? "红队" : "蓝队";
+}
+
+function getTeamTone(team: TeamBattleTeam) {
+  return team === "red"
+    ? {
+        border: "border-red-200",
+        panel: "border-red-200 bg-red-50",
+        text: "text-red-700",
+        soft: "bg-red-100 text-red-700",
+        solid: "bg-red-600 text-white",
+        ring: "ring-red-200",
+      }
+    : {
+        border: "border-sky-200",
+        panel: "border-sky-200 bg-sky-50",
+        text: "text-sky-700",
+        soft: "bg-sky-100 text-sky-700",
+        solid: "bg-sky-600 text-white",
+        ring: "ring-sky-200",
+      };
+}
+
+function getTeamBattlePhaseLabel(phase: TeamBattlePhase) {
+  if (phase === "REVEAL_VOTE") {
+    return "选格";
+  }
+
+  if (phase === "GUESS_VOTE") {
+    return "猜测";
+  }
+
+  if (phase === "JUDGING") {
+    return "判定";
+  }
+
+  return "复盘";
 }
 
 function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
@@ -672,6 +709,72 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
     : [];
+  const teamBattleActiveTone = getTeamTone(teamBattleActiveTeam);
+  const teamBattlePlayerTone = teamBattlePlayerTeam ? getTeamTone(teamBattlePlayerTeam) : null;
+  const teamBattlePhaseLabel = teamBattleState ? getTeamBattlePhaseLabel(teamBattleState.phase) : "";
+  const teamBattleRevealSubmittedCount = Object.keys(teamBattleState?.revealVotes ?? {}).length;
+  const teamBattleGuessSubmittedCount = Object.keys(teamBattleState?.guessVotes ?? {}).length;
+  const teamBattleSubmittedCount =
+    teamBattleState?.phase === "REVEAL_VOTE"
+      ? teamBattleRevealSubmittedCount
+      : teamBattleState?.phase === "GUESS_VOTE"
+        ? teamBattleGuessSubmittedCount
+        : 0;
+  const teamBattleVoteTotal = teamBattleActiveMembers.length;
+  const teamBattleVoteProgress = teamBattleVoteTotal > 0 ? (teamBattleSubmittedCount / teamBattleVoteTotal) * 100 : 0;
+  const teamBattleHasSubmittedRevealVote = Boolean(teamBattleState?.revealVotes[playerId]);
+  const teamBattleHasSubmittedGuessVote = Boolean(teamBattleState?.guessVotes[playerId]);
+  const teamBattleHasSubmittedCurrentVote =
+    teamBattleState?.phase === "REVEAL_VOTE"
+      ? teamBattleHasSubmittedRevealVote
+      : teamBattleState?.phase === "GUESS_VOTE"
+        ? teamBattleHasSubmittedGuessVote
+        : false;
+  const teamBattleIsVoteClosed = teamBattleVoteSeconds === 0;
+  let teamBattleTaskTitle = "等待本题开始";
+  let teamBattleTaskDetail = "观察图片与队伍状态";
+  let teamBattleTaskTone = "border-slate-200 bg-white";
+  let teamBattleTaskBadge = "待机";
+
+  if (teamBattleState) {
+    if (isPresenter) {
+      teamBattleTaskTone = "border-slate-200 bg-white";
+      teamBattleTaskBadge = "裁判";
+      if (teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess) {
+        teamBattleTaskTitle = "判定猜测";
+        teamBattleTaskDetail = "点猜对或猜错";
+      } else if (teamBattleState.phase === "REVIEW") {
+        teamBattleTaskTitle = "复盘答案";
+        teamBattleTaskDetail = hasNextQuestion ? "切到下一张" : "查看排行榜";
+      } else {
+        teamBattleTaskTitle = `等待${getTeamName(teamBattleActiveTeam)}`;
+        teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
+      }
+    } else if (!teamBattlePlayerTeam) {
+      teamBattleTaskTitle = "观战";
+      teamBattleTaskDetail = "等待下一局分队";
+    } else if (teamBattleCanAct && teamBattleState.phase === "REVEAL_VOTE") {
+      teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
+      teamBattleTaskBadge = teamBattleHasSubmittedRevealVote ? "可修改" : "轮到你";
+      teamBattleTaskTitle = teamBattleHasSubmittedRevealVote ? "已提交选格" : "点图选格";
+      teamBattleTaskDetail = `${teamSelectedBlocks.length}/${teamBattleRequiredBlockCount} 个`;
+    } else if (teamBattleCanAct && teamBattleState.phase === "GUESS_VOTE") {
+      teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
+      teamBattleTaskBadge = teamBattleHasSubmittedGuessVote ? "可修改" : "轮到你";
+      teamBattleTaskTitle = teamBattleHasSubmittedGuessVote ? "已提交猜测票" : "投票猜或不猜";
+      teamBattleTaskDetail = teamBattleHasSubmittedGuessVote ? "可改投" : "二选一";
+    } else if (teamBattleState.phase === "JUDGING") {
+      teamBattleTaskTitle = "等待裁判";
+      teamBattleTaskDetail = "正在判定";
+    } else if (teamBattleState.phase === "REVIEW") {
+      teamBattleTaskTitle = "查看答案";
+      teamBattleTaskDetail = "等待下一题";
+    } else {
+      teamBattleTaskTitle = `等待${getTeamName(teamBattleActiveTeam)}`;
+      teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
+    }
+  }
+
   const canConfirmReveal =
     isPresenter &&
     !isTeamBattleMode &&
@@ -1215,34 +1318,55 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       {isTeamBattleMode && teamBattleState ? (
         <>
-          <p className="mb-2 text-sm font-semibold text-slate-900">队伍积分榜</p>
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-semibold text-slate-950">我的身份</span>
+            <span
+              className={[
+                "shrink-0 rounded px-3 py-1 text-sm font-bold",
+                isPresenter
+                  ? "bg-slate-900 text-white"
+                  : teamBattlePlayerTone?.solid ?? "bg-slate-200 text-slate-700",
+              ].join(" ")}
+            >
+              {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : "观战"}
+            </span>
+          </div>
+          <p className="mb-2 text-sm font-semibold text-slate-900">队伍</p>
           <div className="grid gap-2">
             {teamBattleScoreRows.map((row, index) => {
               const isActiveTeam = teamBattleState.activeTeam === row.team;
+              const tone = getTeamTone(row.team);
 
               return (
                 <div
                   className={[
                     "rounded-md border px-3 py-3 text-sm",
-                    row.team === "red" ? "border-red-200 bg-red-50" : "border-sky-200 bg-sky-50",
-                    isActiveTeam ? "ring-2 ring-slate-900/10" : "",
+                    tone.panel,
+                    isActiveTeam ? `ring-2 ${tone.ring}` : "",
                   ].join(" ")}
                   key={row.team}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-xs font-semibold text-[var(--muted)]">#{index + 1}</p>
-                      <p className={row.team === "red" ? "font-bold text-red-700" : "font-bold text-sky-700"}>
+                      <p className={["font-bold", tone.text].join(" ")}>
                         {getTeamName(row.team)}
-                        {isActiveTeam ? "（行动中）" : ""}
+                        {isActiveTeam ? " · 行动中" : ""}
                       </p>
                     </div>
                     <span className="text-xl font-bold text-slate-950">{row.score}</span>
                   </div>
                   <div className="mt-3 grid gap-2">
                     {row.members.map((member) => (
-                      <div className="rounded-md bg-white/80 px-3 py-2" key={member.id}>
+                      <div
+                        className={[
+                          "rounded-md bg-white/80 px-3 py-2",
+                          member.id === playerId ? "ring-2 ring-slate-900/10" : "",
+                        ].join(" ")}
+                        key={member.id}
+                      >
                         <span className="block truncate font-semibold text-slate-950">{member.nickname}</span>
+                        {member.id === playerId ? <span className="text-xs font-semibold text-[var(--muted)]">你</span> : null}
                       </div>
                     ))}
                   </div>
@@ -1467,165 +1591,211 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           ) : null}
         </>
       ) : isTeamBattleMode && teamBattleState ? (
-        <>
-          <p className="text-sm font-semibold text-slate-950">红蓝对抗</p>
-          <div className="mt-2 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-            <p className="font-semibold text-slate-950">
-              {getTeamName(teamBattleActiveTeam)} ·{" "}
-              {teamBattleState.phase === "REVEAL_VOTE"
-                ? "选择揭露方块"
-                : teamBattleState.phase === "GUESS_VOTE"
-                  ? "决定是否猜测"
-                  : teamBattleState.phase === "JUDGING"
-                    ? "等待裁判判定"
-                    : "本题复盘"}
-            </p>
-            <p className="mt-1 text-[var(--muted)]">{teamBattleState.message}</p>
-            {canSeeTeamBattleCountdown && teamBattleVoteSeconds !== null ? (
-              <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
-                自由修改倒计时：{teamBattleVoteSeconds} 秒
-              </p>
-            ) : null}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-950">本轮</p>
+            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{teamBattlePhaseLabel}</span>
           </div>
 
-          {teamBattleState.phase === "REVEAL_VOTE" ? (
-            <div className="mt-3 space-y-3">
-              <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-                <p className="font-semibold text-slate-950">
-                  本回合需选择 {teamBattleRequiredBlockCount} 个方块
-                </p>
-                <p className="mt-1 text-[var(--muted)]">
-                  已提交 {Object.keys(teamBattleState.revealVotes).length} / {teamBattleActiveMembers.length} 人。
-                </p>
-                {!isPresenter && teamBattlePlayerTeam ? (
-                  <p className="mt-1 text-[var(--muted)]">
-                    你属于{getTeamName(teamBattlePlayerTeam)}
-                    {teamBattleCanAct ? "，当前可以投票。" : "，等待对方队伍行动。"}
+          <section className={["rounded-md border p-4", teamBattleTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{teamBattleTaskBadge}</span>
+              {teamBattleVoteSeconds !== null && canSeeTeamBattleCountdown ? (
+                <span className="rounded bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800">
+                  {teamBattleVoteSeconds}s
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{teamBattleTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{teamBattleTaskDetail}</p>
+          </section>
+
+          {teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE" ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">队内进度</span>
+                <span className="font-bold text-slate-950">
+                  {teamBattleSubmittedCount}/{teamBattleVoteTotal}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className={["h-full rounded-full", teamBattleActiveTone.solid].join(" ")}
+                  style={{ width: `${Math.min(100, teamBattleVoteProgress)}%` }}
+                />
+              </div>
+              {teamBattleHasSubmittedCurrentVote ? (
+                <p className="mt-2 text-xs font-semibold text-emerald-700">你已提交，截止前可改。</p>
+              ) : null}
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              {teamBattleIsVoteClosed ? <span className="text-xs font-semibold text-amber-700">结算中</span> : null}
+            </div>
+
+            {teamBattleState.phase === "REVEAL_VOTE" ? (
+              <div className="space-y-3">
+                <div className="rounded-md bg-white px-3 py-2 text-sm">
+                  <span className="font-semibold text-slate-950">选格：</span>
+                  <span className="text-[var(--muted)]">
+                    {teamSelectedBlocks.length}/{teamBattleRequiredBlockCount}
+                  </span>
+                </div>
+                {teamBattleCanAct ? (
+                  <Button
+                    className="w-full"
+                    type="button"
+                    onClick={handleSubmitTeamBattleRevealVote}
+                    disabled={
+                      isSubmittingTeamBattle ||
+                      teamSelectedBlocks.length !== teamBattleRequiredBlockCount ||
+                      teamBattleIsVoteClosed
+                    }
+                  >
+                    {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedRevealVote ? "更新选格" : "提交选格"}
+                  </Button>
+                ) : (
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                    {isPresenter ? "等待队员选格。" : "等待当前队伍完成选格。"}
                   </p>
+                )}
+              </div>
+            ) : null}
+
+            {teamBattleState.phase === "GUESS_VOTE" ? (
+              <div className="space-y-3">
+                {canSeeTeamBattleVotes ? (
+                  <div className="rounded-md bg-white p-3 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold text-slate-950">队内已投</p>
+                      {teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                        <span className="text-xs font-semibold text-[var(--muted)]">点一下跟投</span>
+                      ) : null}
+                    </div>
+                    {teamBattleGuessOptions.length > 0 ? (
+                      <div className="mt-2 space-y-2">
+                        {teamBattleGuessOptions.map((option) => (
+                          <button
+                            className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-default disabled:hover:border-[var(--line)] disabled:hover:bg-slate-50"
+                            disabled={!teamBattleCanAct || teamBattleIsVoteClosed || isSubmittingTeamBattle}
+                            key={option.key}
+                            type="button"
+                            onClick={() => {
+                              if (option.vote.type === "skip") {
+                                void handleSubmitTeamBattleGuessVote({ type: "skip" });
+                                return;
+                              }
+
+                              const nextAnswer = option.vote.answerText ?? "";
+                              setTeamGuessText(nextAnswer);
+                              void handleSubmitTeamBattleGuessVote({ type: "guess", answerText: nextAnswer });
+                            }}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate font-semibold text-slate-950">{option.label}</span>
+                              {teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                                <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                                  {option.vote.type === "skip" ? "跟投不猜" : "采用并提交"}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-700">
+                              {option.count}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">暂无队内投票。</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待当前队伍决定。</p>
+                )}
+
+                {teamBattleCanAct ? (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold text-slate-950">我的答案</p>
+                      <input
+                        className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                        maxLength={80}
+                        placeholder="输入答案"
+                        value={teamGuessText}
+                        onChange={(event) => setTeamGuessText(event.target.value)}
+                      />
+                      <Button
+                        className="w-full"
+                        type="button"
+                        onClick={() => handleSubmitTeamBattleGuessVote({ type: "guess", answerText: teamGuessText })}
+                        disabled={isSubmittingTeamBattle || teamGuessText.trim().length === 0 || teamBattleIsVoteClosed}
+                      >
+                        {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedGuessVote ? "更新猜测" : "提交猜测"}
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)]">
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                      <span>或者</span>
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                    </div>
+                    <button
+                      className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-4 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      type="button"
+                      onClick={() => handleSubmitTeamBattleGuessVote({ type: "skip" })}
+                      disabled={isSubmittingTeamBattle || teamBattleIsVoteClosed}
+                    >
+                      本轮不猜
+                    </button>
+                  </div>
                 ) : null}
               </div>
-              {teamBattleCanAct ? (
-                <Button
-                  className="w-full"
-                  type="button"
-                  onClick={handleSubmitTeamBattleRevealVote}
-                  disabled={
-                    isSubmittingTeamBattle ||
-                    teamSelectedBlocks.length !== teamBattleRequiredBlockCount ||
-                    teamBattleVoteSeconds === 0
-                  }
-                >
-                  {isSubmittingTeamBattle ? "提交中..." : "提交揭露投票"}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
 
-          {teamBattleState.phase === "GUESS_VOTE" ? (
-            <div className="mt-3 space-y-3">
-              <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-                <p className="font-semibold text-slate-950">
-                  已提交 {Object.keys(teamBattleState.guessVotes).length} / {teamBattleActiveMembers.length} 人
-                </p>
-                <div className="mt-2 space-y-2">
-                  {canSeeTeamBattleVotes && teamBattleGuessOptions.length > 0 ? (
-                    teamBattleGuessOptions.map((option) => (
-                      <button
-                        className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm hover:border-emerald-300"
-                        key={option.key}
-                        type="button"
-                        onClick={() => {
-                          if (option.vote.type === "guess") {
-                            setTeamGuessText(option.vote.answerText ?? "");
-                          }
-                        }}
-                      >
-                        <span className="min-w-0 truncate">{option.label}</span>
-                        <span className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                          {option.count}
-                        </span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="text-[var(--muted)]">
-                      {canSeeTeamBattleVotes ? "还没有队员提交选择。" : "等待当前队伍完成内部投票。"}
-                    </p>
-                  )}
-                </div>
+            {teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess ? (
+              <div className="rounded-md bg-white p-3 text-sm">
+                <p className="font-semibold text-slate-950">{getTeamName(teamBattleState.pendingGuess.team)}猜测</p>
+                <p className="mt-2 break-words text-lg font-bold text-slate-950">{teamBattleState.pendingGuess.answerText}</p>
+                {isPresenter ? (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>
+                      猜对
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => handleJudgeTeamBattleGuess(false)}
+                      disabled={isJudgingTeamBattle}
+                    >
+                      猜错
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-[var(--muted)]">等待裁判。</p>
+                )}
               </div>
-              {teamBattleCanAct ? (
-                <div className="space-y-2">
-                  <Button
-                    className="w-full"
-                    type="button"
-                    variant="secondary"
-                    onClick={() => handleSubmitTeamBattleGuessVote({ type: "skip" })}
-                    disabled={isSubmittingTeamBattle || teamBattleVoteSeconds === 0}
-                  >
-                    投票不猜
-                  </Button>
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium text-slate-900">猜测答案</span>
-                    <input
-                      className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                      maxLength={80}
-                      placeholder="输入动画名称"
-                      value={teamGuessText}
-                      onChange={(event) => setTeamGuessText(event.target.value)}
-                    />
-                  </label>
-                  <Button
-                    className="w-full"
-                    type="button"
-                    onClick={() => handleSubmitTeamBattleGuessVote({ type: "guess", answerText: teamGuessText })}
-                    disabled={isSubmittingTeamBattle || teamGuessText.trim().length === 0 || teamBattleVoteSeconds === 0}
-                  >
-                    提交猜测投票
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
 
-          {teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess ? (
-            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <p className="font-semibold text-slate-950">
-                {getTeamName(teamBattleState.pendingGuess.team)}猜测
+            {teamBattleState.phase === "REVIEW" ? (
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                本题已公布，等待切换。
               </p>
-              <p className="mt-2 break-words text-lg font-semibold text-slate-950">
-                {teamBattleState.pendingGuess.answerText}
-              </p>
-              {isPresenter ? (
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>
-                    猜对
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => handleJudgeTeamBattleGuess(false)}
-                    disabled={isJudgingTeamBattle}
-                  >
-                    猜错
-                  </Button>
-                </div>
-              ) : (
-                <p className="mt-2 text-[var(--muted)]">等待出题人判定。</p>
-              )}
-            </div>
-          ) : null}
+            ) : null}
+          </section>
 
           {isPresenter ? (
-            <div className="mt-3 grid gap-2">
+            <div className="grid gap-2 border-t border-[var(--line)] pt-4">
               <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
-                {isSkippingQuestion ? "公布中..." : "直接公布答案"}
+                {isSkippingQuestion ? "公布中..." : "公布答案"}
               </Button>
               <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-                {isEndingGame ? "结束中..." : "结束本局游戏"}
+                {isEndingGame ? "结束中..." : "结束本局"}
               </Button>
             </div>
           ) : null}
-        </>
+        </div>
       ) : isPresenter ? (
         <>
           <p className="text-sm font-semibold text-slate-950">出题人操作</p>
@@ -1746,40 +1916,86 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   return (
     <div className="space-y-4">
       <div className={`${playingGridClass} text-sm`}>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">房间 / 当前玩家</p>
-          <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
-          <p className="mt-1 truncate text-xs text-[var(--muted)]">
-            {currentPlayerName}
-            {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">当前题号</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            {gameSession.currentQuestionIndex + 1} / {questions.length}
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">当前轮次</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            第 {currentRound} / {maxRevealRounds} 轮
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">本轮分数</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">倒计时</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">已答对</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            {questionResults.length} / {guessers.length}
-          </p>
-        </div>
+        {isTeamBattleMode && teamBattleState ? (
+          <>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
+              <p className="mt-1 truncate text-xs text-[var(--muted)]">
+                {currentPlayerName}
+                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前题号</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {gameSession.currentQuestionIndex + 1} / {questions.length}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">对抗回合</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">第 {teamBattleState.turnNumber} 回合</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前阶段</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{teamBattlePhaseLabel}</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">行动队伍</p>
+              <p className={["mt-1 text-lg font-bold", teamBattleActiveTone.text].join(" ")}>
+                {getTeamName(teamBattleActiveTeam)}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">投票</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {teamBattleState.phase === "JUDGING" || teamBattleState.phase === "REVIEW"
+                  ? "已结算"
+                  : `${teamBattleSubmittedCount} / ${teamBattleVoteTotal}`}
+              </p>
+              {teamBattleVoteSeconds !== null && canSeeTeamBattleCountdown ? (
+                <p className="mt-1 text-xs font-semibold text-amber-700">{teamBattleVoteSeconds} 秒</p>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
+              <p className="mt-1 truncate text-xs text-[var(--muted)]">
+                {currentPlayerName}
+                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前题号</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {gameSession.currentQuestionIndex + 1} / {questions.length}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前轮次</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                第 {currentRound} / {maxRevealRounds} 轮
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">本轮分数</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">倒计时</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">已答对</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {questionResults.length} / {guessers.length}
+              </p>
+            </div>
+          </>
+        )}
       </div>
 
       <div className={playingGridClass}>
