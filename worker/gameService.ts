@@ -225,16 +225,28 @@ function normalizeGuessVotes(value: unknown) {
   return votes;
 }
 
-function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: string, previousScores?: Record<TeamBattleTeam, number>): TeamBattleState {
-  const guessers = players
-    .filter((player) => player.id !== presenterPlayerId)
-    .sort((a, b) => a.joined_at.localeCompare(b.joined_at));
-  const red: string[] = [];
-  const blue: string[] = [];
+function randomInt(maxExclusive: number) {
+  return Math.floor(Math.random() * maxExclusive);
+}
 
-  guessers.forEach((player, index) => {
-    (index % 2 === 0 ? red : blue).push(player.id);
-  });
+function shuffleItems<T>(items: T[]) {
+  const shuffled = [...items];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(index + 1);
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+
+  return shuffled;
+}
+
+function createInitialTeamBattleState(players: DbPlayer[], presenterPlayerId: string, previousScores?: Record<TeamBattleTeam, number>): TeamBattleState {
+  const guessers = shuffleItems(players.filter((player) => player.id !== presenterPlayerId));
+  const largerTeamSize = Math.ceil(guessers.length / 2);
+  const redGetsExtraPlayer = guessers.length % 2 === 1 ? randomInt(2) === 0 : true;
+  const redTeamSize = redGetsExtraPlayer ? largerTeamSize : Math.floor(guessers.length / 2);
+  const red = guessers.slice(0, redTeamSize).map((player) => player.id);
+  const blue = guessers.slice(redTeamSize).map((player) => player.id);
 
   return {
     teams: { red, blue },
@@ -319,7 +331,7 @@ function voteDeadlineReached(state: TeamBattleState) {
 }
 
 function randomChoice<T>(items: T[]) {
-  return items[Math.floor(Math.random() * items.length)];
+  return items[randomInt(items.length)];
 }
 
 function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "answerText">) {

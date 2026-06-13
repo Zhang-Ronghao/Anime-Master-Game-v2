@@ -157,7 +157,7 @@ function PlayerList({
           <div className="rounded-md border border-[var(--line)] bg-white p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-950">答题玩家</p>
-              <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">开始后自动平均分队</span>
+              <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">开始后随机平均分队</span>
             </div>
             <div className="grid gap-2">
               {guessers.length > 0 ? (
@@ -330,7 +330,7 @@ function GameSettingsPanel({
       </div>
       ) : isTeamBattleMode ? (
         <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-          除出题者外自动分成红蓝两队。每回合由当前队伍投票选择揭露方块，再投票决定是否猜测；猜中队伍 +1 分，猜错则对方下回合可揭露 2 个方块。
+          除出题者外随机平均分成红蓝两队。每回合由当前队伍投票选择揭露方块，再投票决定是否猜测；猜中队伍 +1 分，猜错则对方下回合可揭露 2 个方块。
         </div>
       ) : (
         <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
