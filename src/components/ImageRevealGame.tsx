@@ -655,6 +655,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       correctCount: scores.find((score) => score.playerId === player.id)?.correctCount ?? 0,
     }))
     .sort((a, b) => b.score - a.score);
+  const teamBattleScoreRows = teamBattleState
+    ? (["red", "blue"] as const)
+        .map((team) => ({
+          team,
+          score: teamBattleState.teamScores[team],
+          members: teamBattleState.teams[team].map((memberId) => {
+            const player = room.players.find((currentPlayer) => currentPlayer.id === memberId);
+
+            return {
+              id: memberId,
+              nickname: player?.nickname ?? memberId,
+            };
+          }),
+        }))
+        .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+    : [];
   const canConfirmReveal =
     isPresenter &&
     !isTeamBattleMode &&
@@ -1197,80 +1213,91 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       {isTeamBattleMode && teamBattleState ? (
-        <div className="mb-4 space-y-2">
-          <p className="text-sm font-semibold text-slate-900">红蓝队比分</p>
-          {(["red", "blue"] as const).map((team) => {
-            const teamMembers = teamBattleState.teams[team]
-              .map((memberId) => room.players.find((player) => player.id === memberId)?.nickname ?? memberId)
-              .join("、");
-            const isActiveTeam = teamBattleState.activeTeam === team;
+        <>
+          <p className="mb-2 text-sm font-semibold text-slate-900">队伍积分榜</p>
+          <div className="grid gap-2">
+            {teamBattleScoreRows.map((row, index) => {
+              const isActiveTeam = teamBattleState.activeTeam === row.team;
 
-            return (
-              <div
-                className={[
-                  "rounded-md border px-3 py-2 text-sm",
-                  team === "red" ? "border-red-200 bg-red-50" : "border-sky-200 bg-sky-50",
-                  isActiveTeam ? "ring-2 ring-slate-900/10" : "",
-                ].join(" ")}
-                key={team}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className={team === "red" ? "font-semibold text-red-700" : "font-semibold text-sky-700"}>
-                    {getTeamName(team)}
-                    {isActiveTeam ? "（行动中）" : ""}
-                  </span>
-                  <span className="text-lg font-bold text-slate-950">{teamBattleState.teamScores[team]}</span>
+              return (
+                <div
+                  className={[
+                    "rounded-md border px-3 py-3 text-sm",
+                    row.team === "red" ? "border-red-200 bg-red-50" : "border-sky-200 bg-sky-50",
+                    isActiveTeam ? "ring-2 ring-slate-900/10" : "",
+                  ].join(" ")}
+                  key={row.team}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-[var(--muted)]">#{index + 1}</p>
+                      <p className={row.team === "red" ? "font-bold text-red-700" : "font-bold text-sky-700"}>
+                        {getTeamName(row.team)}
+                        {isActiveTeam ? "（行动中）" : ""}
+                      </p>
+                    </div>
+                    <span className="text-xl font-bold text-slate-950">{row.score}</span>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    {row.members.map((member) => (
+                      <div className="rounded-md bg-white/80 px-3 py-2" key={member.id}>
+                        <span className="block truncate font-semibold text-slate-950">{member.nickname}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <p className="mt-1 break-words text-xs text-[var(--muted)]">{teamMembers || "暂无队员"}</p>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-      <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-        {scoreRows.map(({ player, score, correctCount }, index) => {
-          const alreadyCorrect = correctPlayerSet.has(player.id);
-          const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
-          const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
-          return (
-            <div
-              className="rounded-md bg-slate-50 px-3 py-2 text-sm"
-              key={player.id}
-              ref={(element) => {
-                scoreRowRefs.current[player.id] = element;
-              }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0 font-semibold text-slate-950">
-                  #{index + 1} {player.nickname}
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+            {scoreRows.map(({ player, score, correctCount }, index) => {
+              const alreadyCorrect = correctPlayerSet.has(player.id);
+              const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
+              const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
+              return (
+                <div
+                  className="rounded-md bg-slate-50 px-3 py-2 text-sm"
+                  key={player.id}
+                  ref={(element) => {
+                    scoreRowRefs.current[player.id] = element;
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 font-semibold text-slate-950">
+                      #{index + 1} {player.nickname}
+                    </div>
+                    <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                    <span>答对 {correctCount} 题</span>
+                    {!isPresenter && alreadyCorrect ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                    ) : null}
+                    {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
+                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
+                    ) : null}
+                    {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
+                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                        {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
+                      </span>
+                    ) : null}
+                    {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
+                      <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
+                    ) : null}
+                    {isBuzzerMode && alreadyCorrect ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
-                <span>答对 {correctCount} 题</span>
-                {!isPresenter && alreadyCorrect ? (
-                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
-                ) : null}
-                {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
-                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
-                ) : null}
-                {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
-                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
-                    {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
-                  </span>
-                ) : null}
-                {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
-                  <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
-                ) : null}
-                {isBuzzerMode && alreadyCorrect ? (
-                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 

@@ -26,7 +26,7 @@ import {
   selectPresenterForRound,
   startGameWithQuestionSet,
 } from "@/lib/cloudflareRooms";
-import type { GameMode, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus } from "@/types/game";
+import type { GameMode, GameSession, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus, TeamBattleTeam } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -89,12 +89,91 @@ function getPresenterName(players: Player[], presenterPlayerId?: string | null) 
   return players.find((player) => player.id === presenterPlayerId)?.nickname ?? "未选择";
 }
 
+function getTeamName(team: TeamBattleTeam) {
+  return team === "red" ? "红队" : "蓝队";
+}
+
+function getTeamStyles(team: TeamBattleTeam) {
+  return team === "red"
+    ? {
+        panel: "border-red-200 bg-red-50",
+      }
+    : {
+        panel: "border-sky-200 bg-sky-50",
+      };
+}
+
 function getRoomCodeFromLocation() {
   const roomMatch = window.location.pathname.match(/^\/room\/([^/]+)/);
   return roomMatch ? decodeURIComponent(roomMatch[1]) : "";
 }
 
-function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[]; playerId: string; presenterPlayerId?: string | null }) {
+function PlayerPill({ player, playerId, presenterPlayerId }: { player: Player; playerId: string; presenterPlayerId?: string | null }) {
+  const isPresenter = player.id === presenterPlayerId;
+
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-2">
+      <div className="min-w-0">
+        <p className="truncate text-sm font-semibold text-slate-950">{player.nickname}</p>
+        <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+          {player.id === playerId ? <span>当前标签页玩家</span> : null}
+          {isPresenter ? <span>本局出题人</span> : null}
+        </div>
+      </div>
+      <span className={player.isHost ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700" : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"}>
+        {player.isHost ? "房主" : "玩家"}
+      </span>
+    </div>
+  );
+}
+
+function PlayerList({
+  players,
+  playerId,
+  presenterPlayerId,
+  gameMode,
+}: {
+  players: Player[];
+  playerId: string;
+  presenterPlayerId?: string | null;
+  gameMode: GameMode;
+}) {
+  if (gameMode === "TEAM_BATTLE") {
+    const presenter = players.find((player) => player.id === presenterPlayerId);
+    const guessers = players.filter((player) => player.id !== presenterPlayerId);
+
+    return (
+      <Panel title="队伍与玩家">
+        <div className="space-y-4">
+          {presenter ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-950">出题人</p>
+                <span className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700">裁判</span>
+              </div>
+              <PlayerPill player={presenter} playerId={playerId} presenterPlayerId={presenterPlayerId} />
+            </div>
+          ) : null}
+          <div className="rounded-md border border-[var(--line)] bg-white p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-950">答题玩家</p>
+              <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">开始后自动平均分队</span>
+            </div>
+            <div className="grid gap-2">
+              {guessers.length > 0 ? (
+                guessers.map((player) => (
+                  <PlayerPill key={player.id} player={player} playerId={playerId} presenterPlayerId={presenterPlayerId} />
+                ))
+              ) : (
+                <p className="text-sm text-[var(--muted)]">等待答题玩家加入。</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </Panel>
+    );
+  }
+
   return (
     <Panel title="玩家列表">
       <div className="space-y-3">
@@ -285,6 +364,7 @@ function GameResultPanel({
   onError: (message: string) => void;
 }) {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
   const [publishTitle, setPublishTitle] = useState("");
@@ -312,6 +392,7 @@ function GameResultPanel({
 
         if (isMounted) {
           setLeaderboard(nextLeaderboard);
+          setGameSession(loadedGameSession);
           setQuestionSet(loadedQuestionSet);
           setPublishTitle(loadedQuestionSet?.title ?? "");
           setPublishDescription(loadedQuestionSet?.description ?? "");
@@ -406,12 +487,54 @@ function GameResultPanel({
   const canPublish = Boolean(questionSet && !questionSet.isPublic && questionSet.createdByPlayerId === playerId);
   const canRate = Boolean(questionSet?.isPublic);
   const presenterName = getPresenterName(room.players, room.currentPresenterPlayerId);
+  const isTeamBattleResult = gameSession?.gameMode === "TEAM_BATTLE" && Boolean(gameSession.teamBattleState);
+  const playerById = new Map(room.players.map((player) => [player.id, player]));
+  const teamRows = gameSession?.teamBattleState
+    ? (["red", "blue"] as const)
+        .map((team) => ({
+          team,
+          score: gameSession.teamBattleState?.teamScores[team] ?? 0,
+          members: (gameSession.teamBattleState?.teams[team] ?? []).map((memberId) => ({
+            id: memberId,
+            nickname: playerById.get(memberId)?.nickname ?? memberId,
+          })),
+        }))
+        .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+    : [];
 
   return (
     <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
       <Panel title="最终排行榜">
         {isLoadingLeaderboard ? (
           <p className="text-sm text-[var(--muted)]">正在读取本局分数...</p>
+        ) : isTeamBattleResult ? (
+          <div className="grid gap-3">
+            {teamRows.map((row, index) => {
+              const styles = getTeamStyles(row.team);
+
+              return (
+                <div className={["rounded-md border p-4", styles.panel].join(" ")} key={row.team}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-[var(--muted)]">第 {index + 1} 名</p>
+                      <p className="mt-1 text-lg font-bold text-slate-950">{getTeamName(row.team)}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-2xl font-bold text-slate-950">{row.score}</p>
+                      <p className="text-xs text-[var(--muted)]">队伍总分</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    {row.members.map((member) => (
+                      <div className="rounded-md bg-white/80 px-3 py-2 text-sm" key={member.id}>
+                        <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         ) : leaderboard.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">本局没有玩家得分。</p>
         ) : (
@@ -892,7 +1015,12 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       ) : (
         <div className={shouldShowLobby ? "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]" : "grid gap-5"}>
           {shouldShowLobby ? (
-            <PlayerList players={room.players} playerId={playerId} presenterPlayerId={room.currentPresenterPlayerId} />
+            <PlayerList
+              players={room.players}
+              playerId={playerId}
+              presenterPlayerId={room.currentPresenterPlayerId}
+              gameMode={gameSettings.gameMode}
+            />
           ) : null}
 
           <div className="space-y-5">
