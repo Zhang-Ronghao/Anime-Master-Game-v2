@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/Button";
 import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
@@ -277,6 +277,34 @@ function upsertById<T extends { id: string }>(items: T[], item: T) {
     : [...items, item];
 }
 
+function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, revealedBlocks: number[]) {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const columns = height > width ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
+  const rows = TOTAL_BLOCKS / columns;
+  const blockWidth = width / columns;
+  const blockHeight = height / rows;
+
+  canvas.width = width;
+  canvas.height = height;
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, width, height);
+
+  for (const blockIndex of revealedBlocks) {
+    const column = blockIndex % columns;
+    const row = Math.floor(blockIndex / columns);
+    const sourceX = column * blockWidth;
+    const sourceY = row * blockHeight;
+
+    context.drawImage(image, sourceX, sourceY, blockWidth, blockHeight, sourceX, sourceY, blockWidth, blockHeight);
+  }
+}
+
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -318,6 +346,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
+  const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
 
@@ -648,6 +677,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
+  const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
   const gridColumns = isPortraitImage ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
   const gridRows = TOTAL_BLOCKS / gridColumns;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
@@ -656,6 +686,56 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     () => new Set([...(gameSession?.revealedBlocks ?? []), ...selectedBlocks]),
     [gameSession?.revealedBlocks, selectedBlocks],
   );
+
+  useLayoutEffect(() => {
+    if (isPresenter || !currentQuestion) {
+      return;
+    }
+
+    const canvas = playerImageCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    let isCanceled = false;
+    const context = canvas.getContext("2d");
+    const fallbackWidth = Math.max(1, canvas.width || 1);
+    const fallbackHeight = Math.max(1, canvas.height || 1);
+    canvas.width = fallbackWidth;
+    canvas.height = fallbackHeight;
+    if (context) {
+      context.fillStyle = "#000";
+    }
+    context?.fillRect(0, 0, fallbackWidth, fallbackHeight);
+
+    const image = new Image();
+    image.onload = () => {
+      if (isCanceled) {
+        return;
+      }
+
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+        setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+      }
+
+      setImageLoadFailed(false);
+      drawRevealedBlocksOnCanvas(canvas, image, gameSession?.revealedBlocks ?? []);
+    };
+    image.onerror = () => {
+      if (!isCanceled) {
+        setImageLoadFailed(true);
+      }
+    };
+    image.src = currentQuestion.imageUrl;
+
+    return () => {
+      isCanceled = true;
+      image.onload = null;
+      image.onerror = null;
+    };
+  }, [currentQuestion, gameSession?.revealedBlocks, isPresenter, revealedBlocksKey]);
+
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
@@ -1670,19 +1750,28 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
         }}
       >
-        <img
-          alt=""
-          className="h-full w-full object-cover"
-          src={currentQuestion.imageUrl}
-          onLoad={(event) => {
-            const image = event.currentTarget;
-            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-              setImageAspectRatio(image.naturalWidth / image.naturalHeight);
-              setIsPortraitImage(image.naturalHeight > image.naturalWidth);
-            }
-          }}
-          onError={() => setImageLoadFailed(true)}
-        />
+        {isPresenter ? (
+          <img
+            alt=""
+            className="h-full w-full object-cover"
+            src={currentQuestion.imageUrl}
+            onLoad={(event) => {
+              const image = event.currentTarget;
+              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+                setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+                setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+              }
+            }}
+            onError={() => setImageLoadFailed(true)}
+          />
+        ) : (
+          <canvas
+            aria-label="已揭露的图片区域"
+            className="block h-full w-full bg-black"
+            key={currentQuestion.id}
+            ref={playerImageCanvasRef}
+          />
+        )}
 
         {imageLoadFailed ? (
           <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
