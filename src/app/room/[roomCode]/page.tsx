@@ -89,6 +89,11 @@ function getPresenterName(players: Player[], presenterPlayerId?: string | null) 
   return players.find((player) => player.id === presenterPlayerId)?.nickname ?? "未选择";
 }
 
+function getRoomCodeFromLocation() {
+  const roomMatch = window.location.pathname.match(/^\/room\/([^/]+)/);
+  return roomMatch ? decodeURIComponent(roomMatch[1]) : "";
+}
+
 function PlayerList({ players, playerId, presenterPlayerId }: { players: Player[]; playerId: string; presenterPlayerId?: string | null }) {
   return (
     <Panel title="玩家列表">
@@ -515,10 +520,10 @@ function GameResultPanel({
   );
 }
 
-export default function RoomPage() {
+export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: string } = {}) {
   const params = useParams<{ roomCode: string }>();
   const router = useRouter();
-  const roomCode = params.roomCode;
+  const roomCode = params.roomCode || initialRoomCode || getRoomCodeFromLocation();
   const [room, setRoom] = useState<Room | null>(null);
   const [playerId, setPlayerId] = useState("");
   const [nickname, setNickname] = useState("");
@@ -562,8 +567,7 @@ export default function RoomPage() {
       setNickname(session.nickname);
 
       if (!session.nickname) {
-        setError("缺少昵称，请回到首页重新进入房间。");
-        setIsLoading(false);
+        router.push(`/?roomCode=${encodeURIComponent(roomCode)}`);
         return;
       }
 

@@ -19,8 +19,10 @@ export default function HomePage() {
 
   useEffect(() => {
     const session = getLocalSession();
+    const roomCodeFromUrl = new URLSearchParams(window.location.search).get("roomCode") ?? "";
+
     setNickname(session.nickname);
-    setRoomCode(session.roomCode ?? "");
+    setRoomCode(/^\d{6}$/.test(roomCodeFromUrl) ? roomCodeFromUrl : (session.roomCode ?? ""));
   }, []);
 
   function validateNickname() {

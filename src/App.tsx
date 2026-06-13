@@ -16,6 +16,7 @@ export default function App() {
 
     window.addEventListener("popstate", handleRouteChange);
     window.addEventListener("app-route-change", handleRouteChange);
+    handleRouteChange();
 
     return () => {
       window.removeEventListener("popstate", handleRouteChange);
@@ -23,8 +24,10 @@ export default function App() {
     };
   }, []);
 
-  if (/^\/room\/[^/]+/.test(path)) {
-    return <RoomPage />;
+  const roomMatch = path.match(/^\/room\/([^/]+)/);
+
+  if (roomMatch) {
+    return <RoomPage initialRoomCode={decodeURIComponent(roomMatch[1])} />;
   }
 
   return <HomePage />;
