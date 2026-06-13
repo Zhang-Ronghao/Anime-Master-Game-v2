@@ -334,6 +334,27 @@ export function QuestionSetUploader({
 
   async function handleCreateFromUrlText() {
     clearError();
+
+    if (!title.trim()) {
+      onError("请先输入题库标题。");
+      return;
+    }
+
+    if (!urlText.trim()) {
+      onError("请先粘贴图片 URL，或上传 JSONL 文件。");
+      return;
+    }
+
+    if (importPreview.error) {
+      onError(importPreview.error);
+      return;
+    }
+
+    if (importPreview.items.length === 0) {
+      onError("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+      return;
+    }
+
     setIsCreatingFromText(true);
     resetCreatedSet();
 
@@ -444,7 +465,7 @@ export function QuestionSetUploader({
         <div className="space-y-4">
           {!configStatus.isReady ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              缺少 Cloudinary 上传环境变量，无法上传新图片。
+              缺少图片上传环境变量，无法上传新图片。
             </div>
           ) : null}
           <div

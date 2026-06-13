@@ -992,7 +992,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
       {isLoading ? (
         <Panel title="加载房间">
-          <p className="text-sm leading-6 text-[var(--muted)]">正在从 Cloudflare API 读取房间和玩家列表...</p>
+          <p className="text-sm leading-6 text-[var(--muted)]">正在从游戏服务读取房间和玩家列表...</p>
         </Panel>
       ) : !room ? (
         <Panel title="无法加载房间">

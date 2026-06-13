@@ -174,7 +174,7 @@ function ensureSocket(topic: string) {
 
     for (const pending of state.pending.values()) {
       window.clearTimeout(pending.timer);
-      pending.reject(new Error("WebSocket closed before action ack."));
+      pending.reject(new Error("实时连接已断开，本次操作没有完成。请重试。"));
     }
     state.pending.clear();
     state.socket = null;
@@ -192,7 +192,7 @@ async function httpRpc<T>(name: string, args: unknown[]) {
   });
   const payload = (await response.json()) as { data?: T; error?: string };
   if (!response.ok || payload.error) {
-    throw new Error(payload.error ?? "Cloudflare API request failed.");
+    throw new Error(payload.error ?? "请求游戏服务失败，请稍后重试。");
   }
   return payload.data as T;
 }
@@ -213,7 +213,7 @@ function wsAction<T>(topic: string, name: string, args: unknown[]) {
   const promise = new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       state.pending.delete(clientActionId);
-      reject(new Error("WebSocket action ack timeout."));
+      reject(new Error("实时操作响应超时，请检查网络后重试。"));
     }, ACTION_TIMEOUT_MS);
 
     state.pending.set(clientActionId, {

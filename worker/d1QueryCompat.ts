@@ -127,7 +127,7 @@ function hasExplicitPrimaryKey(table: string, record: Record<string, unknown>) {
 
 function sqlIdentifier(value: string) {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
-    throw new Error(`Invalid SQL identifier: ${value}`);
+    throw new Error(`SQL 标识符无效：${value}`);
   }
   return `"${value}"`;
 }
@@ -259,7 +259,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
   private async execute(): Promise<QueryResult<T>> {
     if (!this.db) {
-      return { data: null, error: { message: "Cloudflare D1 database binding is not available." } };
+      return { data: null, error: { message: "游戏数据库绑定不可用，请检查本地开发服务配置。" } };
     }
 
     try {
@@ -283,14 +283,14 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
 
     if (this.singleMode === "single") {
       if (data.length !== 1) {
-        return { data: null, error: { message: `Expected one row from ${this.table}, got ${data.length}.` } };
+        return { data: null, error: { message: `${this.table} 查询结果异常：预期 1 行，实际 ${data.length} 行。` } };
       }
       return { data: data[0] as T, error: null };
     }
 
     if (this.singleMode === "maybeSingle") {
       if (data.length > 1) {
-        return { data: null, error: { message: `Expected at most one row from ${this.table}, got ${data.length}.` } };
+        return { data: null, error: { message: `${this.table} 查询结果异常：预期最多 1 行，实际 ${data.length} 行。` } };
       }
       return { data: (data[0] as T) ?? null, error: null };
     }
@@ -346,7 +346,7 @@ class D1QueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     delete record.created_at;
 
     if (Object.keys(record).length === 0) {
-      return { data: null, error: { message: `No fields to update for ${this.table}.` } };
+      return { data: null, error: { message: `${this.table} 更新失败：没有可更新的字段。` } };
     }
 
     const params = Object.entries(record).map(([, value]) => value);

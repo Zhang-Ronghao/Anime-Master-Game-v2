@@ -1,4 +1,4 @@
-﻿import { createRoomCode } from "../src/lib/id";
+import { createRoomCode } from "../src/lib/id";
 import { createD1QueryClient } from "./d1QueryCompat";
 import type {
   Answer,
@@ -34,12 +34,12 @@ export function bindGameDatabase(db: D1Database) {
 
 function assertD1Env() {
   if (!d1.hasDatabase()) {
-    throw new Error("Game action failed.");
+    throw new Error("数据库未连接，请确认服务已绑定游戏数据库。");
   }
 }
 
 function getD1PublicConfig(): never {
-  throw new Error("Game action failed.");
+  throw new Error("当前版本不再支持直接访问数据库公共配置，请通过游戏服务操作房间。");
 }
 
 function toPlayer(player: DbPlayer): Player {
@@ -309,7 +309,7 @@ function withVoteDeadlineIfComplete(state: TeamBattleState, votes: Record<string
 function assertTeamBattleSession(gameSession: DbGameSession) {
   const session = toGameSession(gameSession);
   if (session.gameMode !== "TEAM_BATTLE" || !session.teamBattleState) {
-    throw new Error("Game action failed.");
+    throw new Error("当前游戏不是红蓝对抗模式，不能执行该操作。");
   }
   return session;
 }
@@ -468,21 +468,21 @@ export function parseQuestionImportText(importText: string): QuestionImportItem[
     try {
       parsed = JSON.parse(line);
     } catch {
-      throw new Error(`Line ${index + 1} is not valid JSON.`);
+      throw new Error(`第 ${index + 1} 行不是有效 JSON。`);
     }
 
     if (!parsed || typeof parsed !== "object") {
-      throw new Error(`Line ${index + 1} must be a JSON object.`);
+      throw new Error(`第 ${index + 1} 行必须是 JSON 对象。`);
     }
 
     const record = parsed as Record<string, unknown>;
 
     if (typeof record.image_url !== "string" || !isHttpImageUrl(record.image_url.trim())) {
-      throw new Error(`Line ${index + 1} is missing a valid image_url.`);
+      throw new Error(`第 ${index + 1} 行缺少有效的 image_url。`);
     }
 
     if (record.label_text != null && typeof record.label_text !== "string") {
-      throw new Error(`Line ${index + 1} label_text must be a string.`);
+      throw new Error(`第 ${index + 1} 行的 label_text 必须是字符串。`);
     }
 
     const labelText = typeof record.label_text === "string" ? record.label_text : null;
@@ -551,7 +551,7 @@ export async function createRoom(playerId: string, nickname: string) {
     ]);
   }
 
-  throw new Error("Game action failed.");
+  throw new Error("创建房间失败：连续生成的房间号都已被占用，请重试。");
 }
 
 export async function getRoomByCode(roomCode: string) {
@@ -609,7 +609,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   if (!room) {
     return {
       room: null,
-      error: "Game action failed.",
+      error: "房间不存在，请检查房间号是否正确。",
     };
   }
 
@@ -621,7 +621,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   if (duplicatedNickname) {
     return {
       room: null,
-      error: "Game action failed.",
+      error: "该昵称已在房间内使用，请换一个昵称。",
     };
   }
 
@@ -630,7 +630,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
   if (!isExistingPlayer && players.length >= MAX_PLAYERS_PER_ROOM) {
     return {
       room: null,
-      error: `Room is full. Maximum ${MAX_PLAYERS_PER_ROOM} players.`,
+      error: `房间已满，最多支持 ${MAX_PLAYERS_PER_ROOM} 名玩家。`,
     };
   }
 
@@ -650,7 +650,7 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
     if (isUniqueViolation(error)) {
       return {
         room: null,
-        error: "Game action failed.",
+        error: "该玩家已经在其他房间中，请先退出原房间后再加入。",
       };
     }
 
@@ -684,7 +684,7 @@ export async function leaveRoom(roomId: string, playerId: string) {
 
   const isLeavingPresenter = room.current_presenter_player_id === playerId;
   if (isLeavingPresenter && room.game_status === "PLAYING") {
-    throw new Error("Game action failed.");
+    throw new Error("游戏进行中，出题人不能直接离开房间。");
   }
 
   const isLeavingHost = room.host_player_id === playerId;
@@ -748,7 +748,7 @@ export async function leaveRoom(roomId: string, playerId: string) {
   }
 
   if (!updatedRoom) {
-    throw new Error("Game action failed.");
+    throw new Error("退出房间失败：房间状态已变化，请刷新后重试。");
   }
 
   return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
@@ -804,7 +804,7 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
   }
 
   if (!presenter) {
-    throw new Error("Game action failed.");
+    throw new Error("选择出题人失败：该玩家不在当前房间。");
   }
 
   const { data: room, error } = await d1
@@ -826,7 +826,7 @@ export async function selectPresenterForRound(roomId: string, hostPlayerId: stri
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("只有房主可以在大厅阶段选择出题人。");
   }
 
   return toRoom(room);
@@ -853,7 +853,7 @@ export async function cancelCurrentRound(roomId: string, hostPlayerId: string) {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("取消本轮失败：只有房主可以取消当前出题流程。");
   }
 
   return toRoom(room);
@@ -876,11 +876,11 @@ export async function createUploadedQuestionSet(params: {
   const imageUrls = questionItems.map((item) => item.imageUrl);
 
   if (!title) {
-    throw new Error("Game action failed.");
+    throw new Error("请先输入题库标题。");
   }
 
   if (imageUrls.length === 0) {
-    throw new Error("Game action failed.");
+    throw new Error("没有检测到有效图片 URL，请至少提供一张 http/https 图片。");
   }
 
   const { data: room, error: roomError } = await d1
@@ -896,7 +896,7 @@ export async function createUploadedQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("创建题库失败：当前房间不在出题阶段，或你不是本轮出题人。");
   }
 
   const { data: questionSet, error: questionSetError } = await d1
@@ -955,7 +955,7 @@ export async function createQuestionSetFromUrlText(params: {
   const questions = parseQuestionImportText(params.imageUrlsText);
 
   if (questions.length === 0) {
-    throw new Error("Game action failed.");
+    throw new Error("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
   }
 
   return createUploadedQuestionSet({
@@ -1033,11 +1033,11 @@ export async function prepareQuestionSetForStart(params: {
   }
 
   if (!questionSet || questionSet.image_count <= 0) {
-    throw new Error("Game action failed.");
+    throw new Error("题库不存在，或题库中没有图片。");
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
-    throw new Error("Game action failed.");
+    throw new Error("不能使用他人的未公开题库。");
   }
 
   const { data: room, error } = await d1
@@ -1056,7 +1056,7 @@ export async function prepareQuestionSetForStart(params: {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("准备题库失败：当前房间不在出题阶段，或你不是本轮出题人。");
   }
 
   return toRoom(room);
@@ -1089,7 +1089,7 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("开始游戏失败：只有房主可以使用已准备好的题库开始游戏。");
   }
 
   const { data: questionSet, error: questionSetError } = await d1
@@ -1103,11 +1103,11 @@ export async function startGameWithQuestionSet(params: {
   }
 
   if (!questionSet || questionSet.image_count <= 0) {
-    throw new Error("Game action failed.");
+    throw new Error("开始游戏失败：题库不存在，或题库中没有图片。");
   }
 
   if (questionSet.created_by_player_id !== params.presenterPlayerId && !questionSet.is_public) {
-    throw new Error("Game action failed.");
+    throw new Error("开始游戏失败：不能使用他人的未公开题库。");
   }
 
   const maxRevealRounds = Math.max(1, Math.min(10, Math.floor(params.maxRevealRounds ?? 3)));
@@ -1181,7 +1181,7 @@ export async function startGameWithQuestionSet(params: {
         ended_at: new Date().toISOString(),
       })
       .eq("id", gameSession.id);
-    throw new Error("Game action failed.");
+    throw new Error("开始游戏失败：房间状态已变化，请刷新后重试。");
   }
 
   return {
@@ -1248,7 +1248,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("揭露方块失败：当前游戏不存在，或你不是出题人。");
   }
 
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
@@ -1258,7 +1258,7 @@ export async function confirmRevealBlocks(params: {
   const nextBlocks = Array.from(new Set([...revealedBlocks, ...selectedBlocks])).sort((a, b) => a - b);
 
   if (nextBlocks.length === revealedBlocks.length) {
-    throw new Error("Game action failed.");
+    throw new Error("请至少选择一个尚未揭露的方块。");
   }
 
   const roundStartedAt = currentGameSession.round_started_at;
@@ -1271,11 +1271,11 @@ export async function confirmRevealBlocks(params: {
       : currentGameSession.current_reveal_round;
 
   if (roundStartedAt && !roundEnded) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮倒计时尚未结束，暂时不能继续揭露。");
   }
 
   if (currentGameSession.current_reveal_round >= maxRevealRounds && roundStartedAt && roundEnded) {
-    throw new Error("Game action failed.");
+    throw new Error("已达到最大揭露轮数，请进入判分或复盘。");
   }
 
   const { data: updatedGameSession, error } = await d1
@@ -1296,7 +1296,7 @@ export async function confirmRevealBlocks(params: {
   }
 
   if (!updatedGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("揭露方块失败：游戏状态已变化，请刷新后重试。");
   }
 
   return toGameSession(updatedGameSession);
@@ -1461,7 +1461,7 @@ export async function getLeaderboardForGameSession(gameSessionId: string): Promi
   const gameSession = await getGameSessionById(gameSessionId);
 
   if (!gameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("排行榜加载失败：游戏不存在。");
   }
 
   const [{ data: players, error: playersError }, scores] = await Promise.all([
@@ -1510,7 +1510,7 @@ export async function publishQuestionSetToCommunity(params: {
   const title = params.title.trim();
 
   if (!title) {
-    throw new Error("Game action failed.");
+    throw new Error("发布社区题库前，请先输入题库标题。");
   }
 
   const { data: questionSet, error } = await d1
@@ -1530,7 +1530,7 @@ export async function publishQuestionSetToCommunity(params: {
   }
 
   if (!questionSet) {
-    throw new Error("Game action failed.");
+    throw new Error("发布失败：题库不存在，或你不是题库创建者。");
   }
 
   const questions = await getDbQuestionsByQuestionSetId(questionSet.id);
@@ -1558,7 +1558,7 @@ export async function rateCommunityQuestionSet(params: {
   }
 
   if (!questionSet) {
-    throw new Error("Game action failed.");
+    throw new Error("评分失败：该社区题库不存在或尚未公开。");
   }
 
   const { error: ratingError } = await d1.from("question_set_ratings").upsert(
@@ -1686,7 +1686,7 @@ async function updatePendingBuzzerAnswer(params: {
   }
 
   if (!data) {
-    throw new Error("Game action failed.");
+    throw new Error("更新答案失败：该答案已经被判定，不能再修改。");
   }
 }
 
@@ -1698,7 +1698,7 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
 }) {
   if (params.existingBuzzerAnswer) {
     if (params.existingBuzzerAnswer.status !== "pending") {
-      throw new Error("Game action failed.");
+      throw new Error("该抢答已经被判定，不能再修改。");
     }
 
     await updatePendingBuzzerAnswer({
@@ -1743,7 +1743,7 @@ async function writePendingRoundRevealBuzzerAnswer(params: {
   }
 
   if (!currentBuzzerAnswer || currentBuzzerAnswer.status !== "pending") {
-    throw new Error("Game action failed.");
+    throw new Error("提交失败：该抢答已经被判定，不能再修改。");
   }
 
   await updatePendingBuzzerAnswer({
@@ -1889,29 +1889,29 @@ export async function submitAnswer(params: {
   const answerText = params.answerText.trim();
 
   if (!answerText) {
-    throw new Error("Game action failed.");
+    throw new Error("请先输入答案。");
   }
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (gameSession?.gameMode !== "ROUND_REVEAL") {
-    throw new Error("Game action failed.");
+    throw new Error("当前模式不能提交普通答案。");
   }
 
   if (!gameSession || gameSession.status !== "PLAYING") {
-    throw new Error("Game action failed.");
+    throw new Error("当前游戏未进行中，不能提交答案。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId) {
-    throw new Error("Game action failed.");
+    throw new Error("出题人不能提交答案。");
   }
 
   if (!gameSession.roundStartedAt) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮尚未开始，暂时不能提交答案。");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮答题时间已结束，不能再提交答案。");
   }
 
   const { data: existingResult, error: resultError } = await d1
@@ -1927,7 +1927,7 @@ export async function submitAnswer(params: {
   }
 
   if (existingResult) {
-    throw new Error("Game action failed.");
+    throw new Error("你已答对本题，不能重复提交答案。");
   }
 
   const [{ data: existingAnswer, error: answerLoadError }, { data: existingBuzzerAnswer, error: buzzerLoadError }] =
@@ -1985,7 +1985,7 @@ export async function submitAnswer(params: {
     const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
 
     if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-      throw new Error("Game action failed.");
+      throw new Error("所有答题者都已提交，本轮不能再修改答案。");
     }
   }
 
@@ -2031,15 +2031,15 @@ export async function submitForfeitAnswer(params: {
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("Game action failed.");
+    throw new Error("当前不能放弃作答：游戏未进行中，或不是轮次揭露模式。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
-    throw new Error("Game action failed.");
+    throw new Error("当前不能放弃作答：出题人不能作答，或本轮尚未开始。");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮答题时间已结束，不能再放弃作答。");
   }
 
   const { data: existingResult, error: resultError } = await d1
@@ -2055,7 +2055,7 @@ export async function submitForfeitAnswer(params: {
   }
 
   if (existingResult) {
-    throw new Error("Game action failed.");
+    throw new Error("你已答对本题，不能放弃作答。");
   }
 
   const { data: existingBuzzerAnswer, error: buzzerLoadError } = await d1
@@ -2072,7 +2072,7 @@ export async function submitForfeitAnswer(params: {
   }
 
   if (existingBuzzerAnswer && existingBuzzerAnswer.status !== "pending") {
-    throw new Error("Game action failed.");
+    throw new Error("你的抢答已经被判定，不能改为放弃作答。");
   }
 
   const { data: existingAnswer, error: answerLoadError } = await d1
@@ -2115,7 +2115,7 @@ export async function submitForfeitAnswer(params: {
     const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
 
     if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-      throw new Error("Game action failed.");
+      throw new Error("所有答题者都已提交，本轮不能再修改为放弃作答。");
     }
   }
 
@@ -2132,7 +2132,7 @@ export async function submitForfeitAnswer(params: {
     }
 
     if (!deletedBuzzerAnswer) {
-      throw new Error("Game action failed.");
+      throw new Error("取消抢答失败：该抢答已经被判定。");
     }
   }
 
@@ -2171,15 +2171,15 @@ export async function cancelForfeitAnswer(params: {
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("Game action failed.");
+    throw new Error("当前不能取消放弃：游戏未进行中，或不是轮次揭露模式。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
-    throw new Error("Game action failed.");
+    throw new Error("当前不能取消放弃：出题人不能作答，或本轮尚未开始。");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮答题时间已结束，不能再取消放弃。");
   }
 
   const { data: currentRoundAnswers, error: answersError } = await d1
@@ -2208,7 +2208,7 @@ export async function cancelForfeitAnswer(params: {
   const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
 
   if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-    throw new Error("Game action failed.");
+    throw new Error("所有答题者都已提交，本轮不能再取消放弃。");
   }
 
   const { data: existingAnswer, error: answerLoadError } = await d1
@@ -2225,7 +2225,7 @@ export async function cancelForfeitAnswer(params: {
   }
 
   if (!existingAnswer || !isForfeitAnswer(existingAnswer)) {
-    throw new Error("Game action failed.");
+    throw new Error("你当前没有放弃作答记录，不能取消。");
   }
 
   const { data, error } = await d1
@@ -2254,25 +2254,25 @@ export async function submitBuzzerAnswer(params: {
   const answerText = params.answerText.trim();
 
   if (!answerText) {
-    throw new Error("Game action failed.");
+    throw new Error("请先输入抢答答案。");
   }
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
   if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode === "ROUND_REVEAL" || gameSession.gameMode === "TEAM_BATTLE") {
-    throw new Error("Game action failed.");
+    throw new Error("当前模式不能提交抢答答案。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId) {
-    throw new Error("Game action failed.");
+    throw new Error("出题人不能提交抢答答案。");
   }
 
   if (!gameSession.roundStartedAt) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮尚未开始，暂时不能抢答。");
   }
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮抢答时间已结束，不能再提交。");
   }
 
   const { data: existingResult, error: resultError } = await d1
@@ -2288,7 +2288,7 @@ export async function submitBuzzerAnswer(params: {
   }
 
   if (existingResult) {
-    throw new Error("Game action failed.");
+    throw new Error("你已答对本题，不能重复抢答。");
   }
 
   const { data, error } = await d1
@@ -2306,7 +2306,7 @@ export async function submitBuzzerAnswer(params: {
 
   if (error) {
     if (isUniqueViolation(error)) {
-      throw new Error("Game action failed.");
+      throw new Error("你本轮已经提交过抢答。");
     }
 
     throw new Error(error.message);
@@ -2336,13 +2336,13 @@ export async function judgeBuzzerAnswer(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("判定抢答失败：当前游戏不存在，或你不是出题人。");
   }
 
   const currentSession = toGameSession(currentGameSession);
 
   if (currentSession.gameMode === "TEAM_BATTLE") {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗模式不能使用普通抢答判定。");
   }
 
   const { data: firstPendingAnswer, error: pendingError } = await d1
@@ -2361,7 +2361,7 @@ export async function judgeBuzzerAnswer(params: {
   }
 
   if (!firstPendingAnswer || firstPendingAnswer.id !== params.buzzerAnswerId) {
-    throw new Error("Game action failed.");
+    throw new Error("请先判定最早提交的待判定抢答。");
   }
 
   let scoreAwarded = 0;
@@ -2467,13 +2467,13 @@ export async function settleBuzzerRound(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("结算抢答失败：当前游戏不存在，或你不是出题人。");
   }
 
   const currentSession = toGameSession(currentGameSession);
 
   if (currentSession.gameMode === "TEAM_BATTLE") {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗模式不能使用普通抢答结算。");
   }
 
   const roundEnded = Boolean(
@@ -2482,7 +2482,7 @@ export async function settleBuzzerRound(params: {
   );
 
   if (!roundEnded && currentSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("Game action failed.");
+    throw new Error("本轮倒计时尚未结束，暂时不能结算抢答。");
   }
 
   const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
@@ -2511,14 +2511,14 @@ export async function submitTeamBattleRevealVote(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗投票失败：当前游戏不存在或已结束。");
   }
 
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
 
   if (state.phase !== "REVEAL_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
-    throw new Error("Game action failed.");
+    throw new Error("还没轮到你所在队伍投票，或当前不是揭露投票阶段。");
   }
 
   const revealedSet = new Set(session.revealedBlocks);
@@ -2529,7 +2529,7 @@ export async function submitTeamBattleRevealVote(params: {
   ).sort((a, b) => a - b);
 
   if (selectedBlocks.length !== requiredCount) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮选择的方块数量不正确，请按要求选择尚未揭露的方块。");
   }
 
   const revealVotes = {
@@ -2572,14 +2572,14 @@ export async function submitTeamBattleGuessVote(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗猜测投票失败：当前游戏不存在或已结束。");
   }
 
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
 
   if (state.phase !== "GUESS_VOTE" || getPlayerTeam(state, params.playerId) !== state.activeTeam) {
-    throw new Error("Game action failed.");
+    throw new Error("还没轮到你所在队伍投票，或当前不是猜测投票阶段。");
   }
 
   const vote =
@@ -2591,7 +2591,7 @@ export async function submitTeamBattleGuessVote(params: {
         };
 
   if (vote.type === "guess" && !vote.answerText) {
-    throw new Error("Game action failed.");
+    throw new Error("请输入要猜的答案，或选择跳过。");
   }
 
   const guessVotes = {
@@ -2632,7 +2632,7 @@ export async function finalizeTeamBattleVote(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗结算失败：当前游戏不存在或已结束。");
   }
 
   const session = assertTeamBattleSession(currentGameSession);
@@ -2713,7 +2713,7 @@ export async function finalizeTeamBattleVote(params: {
   }
 
   if (optionCounts.size === 0) {
-    throw new Error("Game action failed.");
+    throw new Error("当前没有可结算的投票。");
   }
 
   const highest = Math.max(...Array.from(optionCounts.values()).map((option) => option.count));
@@ -2795,14 +2795,14 @@ export async function judgeTeamBattleGuess(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("红蓝对抗判定失败：当前游戏不存在，或你不是出题人。");
   }
 
   const session = assertTeamBattleSession(currentGameSession);
   const state = session.teamBattleState!;
 
   if (state.phase !== "JUDGING" || !state.pendingGuess) {
-    throw new Error("Game action failed.");
+    throw new Error("当前没有待判定的红蓝对抗猜测。");
   }
 
   if (!params.isCorrect) {
@@ -2905,7 +2905,7 @@ export async function revealTeamBattleAnswer(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("公布答案失败：当前游戏不存在，或你不是出题人。");
   }
 
   const session = assertTeamBattleSession(currentGameSession);
@@ -2951,11 +2951,11 @@ export async function gradeAnswersAndAdvance(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("判分失败：当前游戏不存在，或你不是出题人。");
   }
 
   if (!currentGameSession.round_started_at) {
-    throw new Error("Game action failed.");
+    throw new Error("本轮尚未开始，不能进行判分。");
   }
 
   const currentRound = currentGameSession.current_reveal_round;
@@ -3107,7 +3107,7 @@ export async function advanceReviewedQuestion(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("进入下一题失败：当前游戏不存在或已结束。");
   }
 
   const { data: room, error: roomLoadError } = await d1
@@ -3124,7 +3124,7 @@ export async function advanceReviewedQuestion(params: {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("只有本局出题人可以进入下一题。");
   }
 
   const currentSession = toGameSession(currentGameSession);
@@ -3132,7 +3132,7 @@ export async function advanceReviewedQuestion(params: {
     !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
 
   if (!isReviewingQuestion) {
-    throw new Error("Game action failed.");
+    throw new Error("当前还没有进入完整图片复盘阶段，不能进入下一题。");
   }
 
   const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
@@ -3211,7 +3211,7 @@ export async function updateQuestionLabel(params: {
   const labelText = params.labelText.trim();
 
   if (!labelText) {
-    throw new Error("Game action failed.");
+    throw new Error("请先填写正确答案标签。");
   }
 
   const { data: currentGameSession, error: currentError } = await d1
@@ -3226,7 +3226,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("更新标签失败：当前游戏不存在或已结束。");
   }
 
   const { data: room, error: roomLoadError } = await d1
@@ -3243,7 +3243,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("只有本局出题人可以更新答案标签。");
   }
 
   const currentSession = toGameSession(currentGameSession);
@@ -3251,7 +3251,7 @@ export async function updateQuestionLabel(params: {
     !currentSession.roundStartedAt && currentSession.revealedBlocks.length === ALL_REVEALED_BLOCKS.length;
 
   if (!isReviewingQuestion) {
-    throw new Error("Game action failed.");
+    throw new Error("当前还没有进入完整图片复盘阶段，不能更新答案标签。");
   }
 
   const { data: question, error: questionError } = await d1
@@ -3267,18 +3267,18 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!question) {
-    throw new Error("Game action failed.");
+    throw new Error("当前题目不存在，不能更新答案标签。");
   }
 
   if (question.label_text?.trim()) {
-    throw new Error("Game action failed.");
+    throw new Error("该题已经有答案标签，不能重复更新。");
   }
 
   let sourceAnswerId: string | null = null;
 
   if (params.source === "answer") {
     if (!params.answerId) {
-      throw new Error("Game action failed.");
+      throw new Error("请选择一个要引用的答案。");
     }
 
     const { data: answer, error: answerError } = await d1
@@ -3309,7 +3309,7 @@ export async function updateQuestionLabel(params: {
       }
 
       if (!buzzerAnswer) {
-        throw new Error("Game action failed.");
+        throw new Error("引用的答案不存在，不能作为标签来源。");
       }
 
       sourceAnswerId = buzzerAnswer.id;
@@ -3335,7 +3335,7 @@ export async function updateQuestionLabel(params: {
   }
 
   if (!updatedQuestion) {
-    throw new Error("Game action failed.");
+    throw new Error("答案标签已被其他操作更新，请刷新后重试。");
   }
 
   return toQuestion(updatedQuestion);
@@ -3360,7 +3360,7 @@ export async function skipCurrentQuestion(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("跳过题目失败：当前游戏不存在，或你不是出题人。");
   }
 
   const questions = await getQuestionsByQuestionSetId(currentGameSession.question_set_id);
@@ -3444,7 +3444,7 @@ export async function endCurrentGameEarly(params: {
   }
 
   if (!currentGameSession) {
-    throw new Error("Game action failed.");
+    throw new Error("结束游戏失败：当前游戏不存在，或你不是出题人。");
   }
 
   const endedAt = new Date().toISOString();
@@ -3505,7 +3505,7 @@ export async function returnRoomToLobby(roomId: string, hostPlayerId: string) {
   }
 
   if (!room) {
-    throw new Error("Game action failed.");
+    throw new Error("返回大厅失败：只有房主可以在结算页返回大厅。");
   }
 
   return toRoom(room);

@@ -97,15 +97,44 @@ function json(data: unknown, init: ResponseInit = {}, request: Request, env: Env
   });
 }
 
+function toUserErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+
+  if (!message) {
+      return "服务发生未知错误，请查看日志。";
+  }
+
+  if (/^[\x00-\x7F]+$/.test(message)) {
+    if (/unique constraint/i.test(message)) {
+      return "保存失败：数据已存在，请刷新后重试。";
+    }
+    if (/foreign key constraint/i.test(message)) {
+      return "保存失败：关联数据不存在，请刷新后重试。";
+    }
+    if (/not null constraint/i.test(message)) {
+      return "保存失败：缺少必填数据。";
+    }
+    if (/check constraint/i.test(message)) {
+      return "保存失败：数据不符合规则。";
+    }
+    if (/no such table/i.test(message)) {
+      return "数据库表不存在，请先执行数据库迁移。";
+    }
+    return "服务发生内部错误，请查看日志。";
+  }
+
+  return message;
+}
+
 function errorResponse(error: unknown, request: Request, env: Env) {
-  const message = error instanceof Error ? error.message : "Unknown Worker error.";
+  const message = toUserErrorMessage(error);
   return json({ error: message }, { status: 400 }, request, env);
 }
 
 function getExportedFunction(name: string) {
   const fn = (gameService as unknown as Record<string, unknown>)[name];
   if (typeof fn !== "function") {
-    throw new Error(`Unknown game RPC: ${name}`);
+    throw new Error(`未知游戏接口：${name}`);
   }
   return fn as (...args: unknown[]) => Promise<unknown>;
 }
@@ -209,8 +238,7 @@ async function handleCloudinaryImages(request: Request, env: Env) {
   if (!cloudName || !apiKey || !apiSecret) {
     return json(
       {
-        error:
-          "Missing Cloudinary Worker configuration: CLOUDINARY_CLOUD_NAME/NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, or CLOUDINARY_API_SECRET.",
+        error: "缺少图片服务配置：请设置云名称、接口密钥和接口密钥密码。",
       },
       { status: 500 },
       request,
@@ -237,7 +265,7 @@ async function handleCloudinaryImages(request: Request, env: Env) {
   };
 
   if (!response.ok) {
-    return json({ error: data.error?.message ?? `Cloudinary HTTP ${response.status}` }, { status: response.status }, request, env);
+    return json({ error: `图片服务请求失败，请检查配置和网络。状态码 ${response.status}。` }, { status: response.status }, request, env);
   }
 
   const images = (data.resources ?? []).map((resource) => ({
@@ -274,7 +302,7 @@ export class RoomDurableObject {
       return new Response(null, { status: 204 });
     }
 
-    return new Response("Not found", { status: 404 });
+    return new Response("未找到对应的实时接口。", { status: 404 });
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -289,7 +317,7 @@ export class RoomDurableObject {
       clientActionId = payload.clientActionId;
 
       if (payload.type !== "action" || !payload.name) {
-        socket.send(JSON.stringify({ type: "error", error: "Invalid WebSocket action." }));
+        socket.send(JSON.stringify({ type: "error", error: "无效的实时操作请求。" }));
         return;
       }
 
@@ -316,7 +344,7 @@ export class RoomDurableObject {
         JSON.stringify({
           type: "action_result",
           clientActionId,
-          error: error instanceof Error ? error.message : "WebSocket action failed.",
+          error: toUserErrorMessage(error),
         }),
       );
     }
@@ -336,7 +364,7 @@ export class RoomDurableObject {
       try {
         socket.send(message);
       } catch {
-        socket.close(1011, "Broadcast failed.");
+        socket.close(1011, "广播失败。");
       }
     }
   }
@@ -365,7 +393,7 @@ export default {
         return getRoomObject(env, topic).fetch(new Request(`https://room-object/ws?topic=${encodeURIComponent(topic)}`, request));
       }
 
-      return json({ error: "Not found" }, { status: 404 }, request, env);
+      return json({ error: "未找到对应的服务接口。" }, { status: 404 }, request, env);
     } catch (error) {
       return errorResponse(error, request, env);
     }
