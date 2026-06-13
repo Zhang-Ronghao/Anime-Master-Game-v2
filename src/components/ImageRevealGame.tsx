@@ -608,6 +608,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const teamBattleActiveMembers = teamBattleState?.teams[teamBattleActiveTeam] ?? [];
   const teamBattleCanAct = Boolean(!isPresenter && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
   const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
+  const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
   const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
   const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
   const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
@@ -1480,7 +1481,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     : "本题复盘"}
             </p>
             <p className="mt-1 text-[var(--muted)]">{teamBattleState.message}</p>
-            {teamBattleVoteSeconds !== null ? (
+            {canSeeTeamBattleCountdown && teamBattleVoteSeconds !== null ? (
               <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
                 自由修改倒计时：{teamBattleVoteSeconds} 秒
               </p>
