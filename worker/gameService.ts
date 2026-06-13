@@ -322,6 +322,10 @@ function randomChoice<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "answerText">) {
+  return "answer_text" in answer ? answer.answer_text === FORFEIT_ANSWER_TEXT : answer.answerText === FORFEIT_ANSWER_TEXT;
+}
+
 function updateTeamBattleState(gameSessionId: string, state: TeamBattleState, extra?: Record<string, unknown>) {
   return d1
     .from("game_sessions")
@@ -394,6 +398,7 @@ const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
+const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 export type QuestionImportItem = {
   imageUrl: string;
@@ -663,16 +668,90 @@ export async function joinRoom(roomCode: string, playerId: string, nickname: str
 export async function leaveRoom(roomId: string, playerId: string) {
   assertD1Env();
 
-  const { error } = await d1
+  const { data: room, error: roomError } = await d1
+    .from("rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle<DbRoom>();
+
+  if (roomError) {
+    throw new Error(roomError.message);
+  }
+
+  if (!room) {
+    return null;
+  }
+
+  const isLeavingPresenter = room.current_presenter_player_id === playerId;
+  if (isLeavingPresenter && room.game_status === "PLAYING") {
+    throw new Error("Game action failed.");
+  }
+
+  const isLeavingHost = room.host_player_id === playerId;
+  const { error: deleteError } = await d1
     .from("players")
     .delete()
     .eq("room_id", roomId)
-    .eq("id", playerId)
-    .eq("is_host", false);
+    .eq("id", playerId);
 
-  if (error) {
-    throw new Error(error.message);
+  if (deleteError) {
+    throw new Error(deleteError.message);
   }
+
+  if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
+    return null;
+  }
+
+  const remainingPlayers = await getDbPlayersByRoomId(roomId);
+  const currentHostStillPresent = remainingPlayers.some((player) => player.id === room.host_player_id);
+  const shouldPromoteHost = isLeavingHost || !currentHostStillPresent;
+  const nextHost = shouldPromoteHost
+    ? remainingPlayers[0] ?? null
+    : remainingPlayers.find((player) => player.id === room.host_player_id) ?? null;
+
+  if (!nextHost) {
+    const { error: roomDeleteError } = await d1.from("rooms").delete().eq("id", roomId);
+    if (roomDeleteError) {
+      throw new Error(roomDeleteError.message);
+    }
+    return null;
+  }
+
+  if (shouldPromoteHost) {
+    const { error: hostPlayerError } = await d1
+      .from("players")
+      .update({ is_host: true })
+      .eq("room_id", roomId)
+      .eq("id", nextHost.id);
+
+    if (hostPlayerError) {
+      throw new Error(hostPlayerError.message);
+    }
+  }
+
+  const roomUpdates: Partial<DbRoom> = { host_player_id: nextHost.id };
+  if (isLeavingPresenter && room.game_status === "QUESTION_SETUP") {
+    roomUpdates.game_status = "LOBBY";
+    roomUpdates.current_presenter_player_id = null;
+    roomUpdates.prepared_question_set_id = null;
+  }
+
+  const { data: updatedRoom, error: hostRoomError } = await d1
+    .from("rooms")
+    .update(roomUpdates)
+    .eq("id", roomId)
+    .select()
+    .maybeSingle<DbRoom>();
+
+  if (hostRoomError) {
+    throw new Error(hostRoomError.message);
+  }
+
+  if (!updatedRoom) {
+    throw new Error("Game action failed.");
+  }
+
+  return toRoom(updatedRoom, await getDbPlayersByRoomId(roomId));
 }
 
 export async function dissolveRoom(roomId: string, playerId: string) {
@@ -1583,6 +1662,96 @@ async function addScoreToPlayer(params: {
   }
 }
 
+async function updatePendingBuzzerAnswer(params: {
+  id: string;
+  answerText: string;
+}) {
+  const { data, error } = await d1
+    .from("buzzer_answers")
+    .update({
+      answer_text: params.answerText,
+      status: "pending",
+      score_awarded: 0,
+      submitted_at: new Date().toISOString(),
+      judged_at: null,
+      judged_by_player_id: null,
+    })
+    .eq("id", params.id)
+    .eq("status", "pending")
+    .select()
+    .maybeSingle<DbBuzzerAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    throw new Error("Game action failed.");
+  }
+}
+
+async function writePendingRoundRevealBuzzerAnswer(params: {
+  gameSession: GameSession;
+  playerId: string;
+  answerText: string;
+  existingBuzzerAnswer: DbBuzzerAnswer | null;
+}) {
+  if (params.existingBuzzerAnswer) {
+    if (params.existingBuzzerAnswer.status !== "pending") {
+      throw new Error("Game action failed.");
+    }
+
+    await updatePendingBuzzerAnswer({
+      id: params.existingBuzzerAnswer.id,
+      answerText: params.answerText,
+    });
+    return;
+  }
+
+  const { error } = await d1.from("buzzer_answers").insert({
+    game_session_id: params.gameSession.id,
+    question_index: params.gameSession.currentQuestionIndex,
+    reveal_round: params.gameSession.currentRevealRound,
+    player_id: params.playerId,
+    answer_text: params.answerText,
+    status: "pending",
+    score_awarded: 0,
+    submitted_at: new Date().toISOString(),
+    judged_at: null,
+    judged_by_player_id: null,
+  });
+
+  if (!error) {
+    return;
+  }
+
+  if (!isUniqueViolation(error)) {
+    throw new Error(error.message);
+  }
+
+  const { data: currentBuzzerAnswer, error: currentError } = await d1
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", params.gameSession.id)
+    .eq("question_index", params.gameSession.currentQuestionIndex)
+    .eq("reveal_round", params.gameSession.currentRevealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbBuzzerAnswer>();
+
+  if (currentError) {
+    throw new Error(currentError.message);
+  }
+
+  if (!currentBuzzerAnswer || currentBuzzerAnswer.status !== "pending") {
+    throw new Error("Game action failed.");
+  }
+
+  await updatePendingBuzzerAnswer({
+    id: currentBuzzerAnswer.id,
+    answerText: params.answerText,
+  });
+}
+
 async function revealQuestionForReview(gameSessionId: string) {
   const { data: reviewedGameSession, error } = await d1
     .from("game_sessions")
@@ -1628,8 +1797,12 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
     roundStartedAt && Date.now() - new Date(roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
   );
 
-  const [{ data: players, error: playersError }, { data: questionResults, error: resultsError }, { data: currentRoundAnswers, error: answersError }] =
-    await Promise.all([
+  const [
+    { data: players, error: playersError },
+    { data: questionResults, error: resultsError },
+    { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
+    { data: currentRoundAnswers, error: answersError },
+  ] = await Promise.all([
       d1.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
       d1
         .from("question_results")
@@ -1644,6 +1817,13 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
         .eq("question_index", questionIndex)
         .eq("reveal_round", currentRound)
         .returns<DbBuzzerAnswer[]>(),
+      d1
+        .from("answers")
+        .select("*")
+        .eq("game_session_id", currentGameSession.id)
+        .eq("question_index", questionIndex)
+        .eq("reveal_round", currentRound)
+        .returns<DbAnswer[]>(),
     ]);
 
   if (playersError) {
@@ -1652,6 +1832,10 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
 
   if (resultsError) {
     throw new Error(resultsError.message);
+  }
+
+  if (buzzerAnswersError) {
+    throw new Error(buzzerAnswersError.message);
   }
 
   if (answersError) {
@@ -1663,10 +1847,16 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
     .map((player) => player.id);
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
   const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
-  const answerByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
-  const hasPendingAnswers = (currentRoundAnswers ?? []).some((answer) => answer.status === "pending");
+  const buzzerAnswerByPlayerId = new Map((currentRoundBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const roundRevealSubmissionByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const hasPendingAnswers = (currentRoundBuzzerAnswers ?? []).some((answer) => answer.status === "pending");
   const allEligiblePlayersUsedChance =
-    eligibleGuesserIds.length === 0 || eligibleGuesserIds.every((guesserId) => answerByPlayerId.has(guesserId));
+    eligibleGuesserIds.length === 0 ||
+    eligibleGuesserIds.every((guesserId) =>
+      currentSession.gameMode === "ROUND_REVEAL"
+        ? roundRevealSubmissionByPlayerId.has(guesserId)
+        : buzzerAnswerByPlayerId.has(guesserId),
+    );
   const hasCorrectAnswer = correctSet.size > 0;
   const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
 
@@ -1740,10 +1930,77 @@ export async function submitAnswer(params: {
     throw new Error("Game action failed.");
   }
 
+  const [{ data: existingAnswer, error: answerLoadError }, { data: existingBuzzerAnswer, error: buzzerLoadError }] =
+    await Promise.all([
+      d1
+        .from("answers")
+        .select("*")
+        .eq("game_session_id", gameSession.id)
+        .eq("question_index", gameSession.currentQuestionIndex)
+        .eq("reveal_round", gameSession.currentRevealRound)
+        .eq("player_id", params.playerId)
+        .maybeSingle<DbAnswer>(),
+      d1
+        .from("buzzer_answers")
+        .select("*")
+        .eq("game_session_id", gameSession.id)
+        .eq("question_index", gameSession.currentQuestionIndex)
+        .eq("reveal_round", gameSession.currentRevealRound)
+        .eq("player_id", params.playerId)
+        .maybeSingle<DbBuzzerAnswer>(),
+    ]);
+
+  if (answerLoadError) {
+    throw new Error(answerLoadError.message);
+  }
+
+  if (buzzerLoadError) {
+    throw new Error(buzzerLoadError.message);
+  }
+
+  if (existingAnswer && isForfeitAnswer(existingAnswer)) {
+    const { data: currentRoundAnswers, error: answersError } = await d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .eq("reveal_round", gameSession.currentRevealRound)
+      .returns<DbAnswer[]>();
+
+    if (answersError) {
+      throw new Error(answersError.message);
+    }
+
+    const { data: players, error: playersError } = await d1
+      .from("players")
+      .select("*")
+      .eq("room_id", gameSession.roomId)
+      .returns<DbPlayer[]>();
+
+    if (playersError) {
+      throw new Error(playersError.message);
+    }
+
+    const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
+    const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
+
+    if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
+      throw new Error("Game action failed.");
+    }
+  }
+
+  await writePendingRoundRevealBuzzerAnswer({
+    gameSession,
+    playerId: params.playerId,
+    answerText,
+    existingBuzzerAnswer,
+  });
+
   const { data, error } = await d1
     .from("answers")
     .upsert(
       {
+        id: existingAnswer?.id,
         game_session_id: gameSession.id,
         question_index: gameSession.currentQuestionIndex,
         reveal_round: gameSession.currentRevealRound,
@@ -1765,6 +2022,228 @@ export async function submitAnswer(params: {
   return toAnswer(data);
 }
 
+export async function submitForfeitAnswer(params: {
+  gameSessionId: string;
+  playerId: string;
+}) {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(params.gameSessionId);
+
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
+    throw new Error("Game action failed.");
+  }
+
+  if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
+    throw new Error("Game action failed.");
+  }
+
+  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+    throw new Error("Game action failed.");
+  }
+
+  const { data: existingResult, error: resultError } = await d1
+    .from("question_results")
+    .select("id")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("player_id", params.playerId)
+    .maybeSingle<{ id: string }>();
+
+  if (resultError) {
+    throw new Error(resultError.message);
+  }
+
+  if (existingResult) {
+    throw new Error("Game action failed.");
+  }
+
+  const { data: existingBuzzerAnswer, error: buzzerLoadError } = await d1
+    .from("buzzer_answers")
+    .select("*")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("reveal_round", gameSession.currentRevealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbBuzzerAnswer>();
+
+  if (buzzerLoadError) {
+    throw new Error(buzzerLoadError.message);
+  }
+
+  if (existingBuzzerAnswer && existingBuzzerAnswer.status !== "pending") {
+    throw new Error("Game action failed.");
+  }
+
+  const { data: existingAnswer, error: answerLoadError } = await d1
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("reveal_round", gameSession.currentRevealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbAnswer>();
+
+  if (answerLoadError) {
+    throw new Error(answerLoadError.message);
+  }
+
+  if (existingAnswer && !isForfeitAnswer(existingAnswer)) {
+    const { data: currentRoundAnswers, error: answersError } = await d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .eq("reveal_round", gameSession.currentRevealRound)
+      .returns<DbAnswer[]>();
+
+    if (answersError) {
+      throw new Error(answersError.message);
+    }
+
+    const { data: players, error: playersError } = await d1
+      .from("players")
+      .select("*")
+      .eq("room_id", gameSession.roomId)
+      .returns<DbPlayer[]>();
+
+    if (playersError) {
+      throw new Error(playersError.message);
+    }
+
+    const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
+    const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
+
+    if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
+      throw new Error("Game action failed.");
+    }
+  }
+
+  if (existingBuzzerAnswer) {
+    const { data: deletedBuzzerAnswer, error: deleteBuzzerError } = await d1
+      .from("buzzer_answers")
+      .delete()
+      .eq("id", existingBuzzerAnswer.id)
+      .eq("status", "pending")
+      .single<DbBuzzerAnswer>();
+
+    if (deleteBuzzerError) {
+      throw new Error(deleteBuzzerError.message);
+    }
+
+    if (!deletedBuzzerAnswer) {
+      throw new Error("Game action failed.");
+    }
+  }
+
+  const { data, error } = await d1
+    .from("answers")
+    .upsert(
+      {
+        id: existingAnswer?.id,
+        game_session_id: gameSession.id,
+        question_index: gameSession.currentQuestionIndex,
+        reveal_round: gameSession.currentRevealRound,
+        player_id: params.playerId,
+        answer_text: FORFEIT_ANSWER_TEXT,
+        submitted_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "game_session_id,question_index,reveal_round,player_id",
+      },
+    )
+    .select()
+    .single<DbAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return toAnswer(data);
+}
+
+export async function cancelForfeitAnswer(params: {
+  gameSessionId: string;
+  playerId: string;
+}) {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(params.gameSessionId);
+
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
+    throw new Error("Game action failed.");
+  }
+
+  if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
+    throw new Error("Game action failed.");
+  }
+
+  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+    throw new Error("Game action failed.");
+  }
+
+  const { data: currentRoundAnswers, error: answersError } = await d1
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("reveal_round", gameSession.currentRevealRound)
+    .returns<DbAnswer[]>();
+
+  if (answersError) {
+    throw new Error(answersError.message);
+  }
+
+  const { data: players, error: playersError } = await d1
+    .from("players")
+    .select("*")
+    .eq("room_id", gameSession.roomId)
+    .returns<DbPlayer[]>();
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
+  const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
+
+  if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
+    throw new Error("Game action failed.");
+  }
+
+  const { data: existingAnswer, error: answerLoadError } = await d1
+    .from("answers")
+    .select("*")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .eq("reveal_round", gameSession.currentRevealRound)
+    .eq("player_id", params.playerId)
+    .maybeSingle<DbAnswer>();
+
+  if (answerLoadError) {
+    throw new Error(answerLoadError.message);
+  }
+
+  if (!existingAnswer || !isForfeitAnswer(existingAnswer)) {
+    throw new Error("Game action failed.");
+  }
+
+  const { data, error } = await d1
+    .from("answers")
+    .delete()
+    .eq("id", existingAnswer.id)
+    .single<DbAnswer>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return {
+    gameSession,
+    canceledAnswerId: data.id,
+  };
+}
+
 export async function submitBuzzerAnswer(params: {
   gameSessionId: string;
   playerId: string;
@@ -1780,7 +2259,7 @@ export async function submitBuzzerAnswer(params: {
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
-  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode === "ROUND_REVEAL") {
+  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode === "ROUND_REVEAL" || gameSession.gameMode === "TEAM_BATTLE") {
     throw new Error("Game action failed.");
   }
 
@@ -1862,7 +2341,7 @@ export async function judgeBuzzerAnswer(params: {
 
   const currentSession = toGameSession(currentGameSession);
 
-  if (currentSession.gameMode === "ROUND_REVEAL") {
+  if (currentSession.gameMode === "TEAM_BATTLE") {
     throw new Error("Game action failed.");
   }
 
@@ -1888,7 +2367,11 @@ export async function judgeBuzzerAnswer(params: {
   let scoreAwarded = 0;
 
   if (params.isCorrect) {
-    if (currentSession.gameMode === "BUZZER_FIRST_CORRECT") {
+    if (currentSession.gameMode === "ROUND_REVEAL") {
+      scoreAwarded =
+        currentSession.roundScores[currentSession.currentRevealRound - 1] ??
+        Math.max(1, currentSession.maxRevealRounds - currentSession.currentRevealRound + 1);
+    } else if (currentSession.gameMode === "BUZZER_FIRST_CORRECT") {
       scoreAwarded = 1;
     } else {
       const [{ data: players, error: playersError }, { data: existingResults, error: resultsError }] = await Promise.all([
@@ -1989,7 +2472,7 @@ export async function settleBuzzerRound(params: {
 
   const currentSession = toGameSession(currentGameSession);
 
-  if (currentSession.gameMode === "ROUND_REVEAL") {
+  if (currentSession.gameMode === "TEAM_BATTLE") {
     throw new Error("Game action failed.");
   }
 
@@ -1998,7 +2481,7 @@ export async function settleBuzzerRound(params: {
       Date.now() - new Date(currentSession.roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
   );
 
-  if (!roundEnded) {
+  if (!roundEnded && currentSession.gameMode !== "ROUND_REVEAL") {
     throw new Error("Game action failed.");
   }
 

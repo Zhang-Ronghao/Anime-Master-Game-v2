@@ -6,8 +6,8 @@ import { Button } from "@/components/Button";
 import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
+  cancelForfeitAnswer,
   confirmRevealBlocks,
-  endCurrentGameEarly,
   finalizeTeamBattleVote,
   getAnswersForQuestion,
   getAnswerForPlayerRound,
@@ -27,6 +27,7 @@ import {
   skipCurrentQuestion,
   submitAnswer,
   submitBuzzerAnswer,
+  submitForfeitAnswer,
   submitTeamBattleGuessVote,
   submitTeamBattleRevealVote,
   updateQuestionLabel,
@@ -60,6 +61,19 @@ const LANDSCAPE_GRID_COLUMNS = 9;
 const PORTRAIT_GRID_COLUMNS = 5;
 const TOTAL_BLOCKS = 45;
 const DEFAULT_ROUND_SECONDS = 60;
+const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+
+function isForfeitAnswer(answer: Answer | null | undefined) {
+  return answer?.answerText === FORFEIT_ANSWER_TEXT;
+}
+
+function getAnswerDisplayText(answer: Answer | null | undefined) {
+  if (!answer) {
+    return "";
+  }
+
+  return isForfeitAnswer(answer) ? "已放弃" : answer.answerText;
+}
 
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
@@ -292,7 +306,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isFinalizingTeamBattle, setIsFinalizingTeamBattle] = useState(false);
   const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
-  const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
@@ -327,30 +340,46 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setQuestionResults(nextResults);
 
       if (targetGameSession.gameMode === "ROUND_REVEAL") {
-        const nextAnswers = await getAnswersForQuestionRound({
-          gameSessionId: targetGameSession.id,
-          questionIndex: targetGameSession.currentQuestionIndex,
-          revealRound: targetGameSession.currentRevealRound,
-        });
+        const [nextAnswers, nextBuzzerAnswers] = await Promise.all([
+          getAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+          getBuzzerAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+        ]);
         setAnswers(nextAnswers);
-        setBuzzerAnswers([]);
-        setMyBuzzerAnswer(null);
+        setBuzzerAnswers(nextBuzzerAnswers);
 
         if (isPresenter) {
           const nextLabelAnswers = await getAnswersForQuestion({
             gameSessionId: targetGameSession.id,
             questionIndex: targetGameSession.currentQuestionIndex,
           });
-          setLabelAnswers(nextLabelAnswers);
+          setLabelAnswers(nextLabelAnswers.filter((answer) => !isForfeitAnswer(answer)));
+          setMyBuzzerAnswer(null);
         } else {
-          const nextMyAnswer = await getAnswerForPlayerRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-            playerId,
-          });
+          const [nextMyAnswer, nextMyBuzzerAnswer] = await Promise.all([
+            getAnswerForPlayerRound({
+              gameSessionId: targetGameSession.id,
+              questionIndex: targetGameSession.currentQuestionIndex,
+              revealRound: targetGameSession.currentRevealRound,
+              playerId,
+            }),
+            getBuzzerAnswerForPlayerRound({
+              gameSessionId: targetGameSession.id,
+              questionIndex: targetGameSession.currentQuestionIndex,
+              revealRound: targetGameSession.currentRevealRound,
+              playerId,
+            }),
+          ]);
           setLabelAnswers([]);
           setMyAnswer(nextMyAnswer);
+          setMyBuzzerAnswer(nextMyBuzzerAnswer);
         }
       } else if (targetGameSession.gameMode === "TEAM_BATTLE") {
         setAnswers([]);
@@ -527,8 +556,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         ) {
           setAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
           if (isPresenter) {
-            setLabelAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
-            showAnswerBubble(pushedAnswer);
+            if (!isForfeitAnswer(pushedAnswer)) {
+              setLabelAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
+              showAnswerBubble(pushedAnswer);
+            }
+            if (currentGameSession.gameMode === "ROUND_REVEAL") {
+              refreshRoundData(currentGameSession).catch((error) => {
+                onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
+              });
+            }
           }
           if (pushedAnswer.playerId === playerId) {
             setMyAnswer(pushedAnswer);
@@ -599,6 +635,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     setAnswerText("");
     setTeamGuessText("");
     setTeamSelectedBlocks([]);
+    setIsRevealPreviewOpen(false);
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
@@ -678,9 +715,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
+  const currentQuestionScoreByPlayerId = useMemo(() => {
+    const scoreByPlayerId = new Map<string, number>();
+    for (const result of questionResults) {
+      scoreByPlayerId.set(result.playerId, (scoreByPlayerId.get(result.playerId) ?? 0) + result.scoreAwarded);
+    }
+    return scoreByPlayerId;
+  }, [questionResults]);
   const pendingBuzzerAnswers = buzzerAnswers.filter((answer) => answer.status === "pending");
   const currentBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
+  const hasUnsubmittedGuessers = activeGuessers.some((player) => !currentRoundAnswerPlayerSet.has(player.id));
+  const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
     activeGuessers.length > 0 && activeGuessers.every((player) => buzzerAnswerPlayerSet.has(player.id));
   const allActiveGuessersSubmitted =
@@ -785,7 +831,34 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
-    !isPresenter && !isBuzzerMode && !isTeamBattleMode && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    answerText.trim().length > 0 &&
+    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending") &&
+    (!myHasForfeited || hasUnsubmittedGuessers);
+  const canForfeitAnswer =
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    !myHasForfeited &&
+    (!myAnswer || hasUnsubmittedGuessers) &&
+    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
+  const canCancelForfeit =
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    myHasForfeited &&
+    hasUnsubmittedGuessers;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
     isBuzzerMode &&
@@ -794,16 +867,156 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !myBuzzerAnswer &&
     isRoundActive &&
     answerText.trim().length > 0;
-  const canGrade = isPresenter && !isBuzzerMode && !isTeamBattleMode && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
-  const canJudgeBuzzer = isPresenter && isBuzzerMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
+  const canGrade = false;
+  const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
     isPresenter &&
-    isBuzzerMode &&
+    !isTeamBattleMode &&
     !isQuestionReviewing &&
-    isRoundEnded &&
     pendingBuzzerAnswers.length === 0 &&
+    (isBuzzerMode ? isRoundEnded : hasRoundStarted && (isRoundEnded || allActiveGuessersSubmitted)) &&
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
+  const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
+  const standardModeLabel = isBuzzerMode ? "抢答" : "轮揭";
+  const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
+  const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
+  const isBuzzerSettleToReview =
+    isBuzzerMode &&
+    (currentRound >= maxRevealRounds ||
+      (gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0) ||
+      (guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id))));
+  const buzzerSettleActionText = isBuzzerSettleToReview ? "公布答案" : "进入下一轮";
+  const standardSettleActionText = isBuzzerMode ? buzzerSettleActionText : currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+  let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
+  let standardTaskTitle = "等待开始";
+  let standardTaskDetail = "等待出题人揭露图片";
+  let standardTaskTone = "border-slate-200 bg-white";
+
+  if (!isTeamBattleMode && !isQuestionReviewing) {
+    if (isPresenter) {
+      standardTaskBadge = "出题人";
+      if (isBuzzerMode) {
+        if (currentBuzzerAnswer) {
+          standardTaskTitle = "判定抢答";
+          standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+        } else if (!hasRoundStarted) {
+          standardTaskTitle = "选格揭图";
+          standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+        } else if (isRoundEnded && (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance)) {
+          standardTaskTitle = buzzerSettleActionText;
+          standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
+        } else {
+          standardTaskTitle = "等待抢答";
+          standardTaskDetail = `${pendingBuzzerAnswers.length} 人排队`;
+        }
+      } else if (currentBuzzerAnswer) {
+        standardTaskTitle = "判定答案";
+        standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+      } else if (isRoundEnded || allActiveGuessersSubmitted) {
+        standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
+      } else if (!hasRoundStarted) {
+        standardTaskTitle = "选格揭图";
+        standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+      } else {
+        standardTaskTitle = "等待作答";
+        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
+      }
+    } else if (isCurrentPlayerCorrect) {
+      standardTaskBadge = "完成";
+      standardTaskTone = "border-emerald-200 bg-emerald-50";
+      standardTaskTitle = "已答对";
+      standardTaskDetail = "等待下一题";
+    } else if (!hasRoundStarted) {
+      standardTaskTitle = "等待揭图";
+      standardTaskDetail = "出题人正在选格";
+    } else if (isBuzzerMode) {
+      if (myBuzzerAnswer?.status === "pending") {
+        standardTaskTitle = "等待判定";
+        standardTaskDetail = `已抢答：${myBuzzerAnswer.answerText}`;
+      } else if (myBuzzerAnswer?.status === "wrong") {
+        standardTaskTitle = "本轮已答错";
+        standardTaskDetail = "等待下一轮";
+      } else if (isRoundEnded) {
+        standardTaskTitle = "等待结算";
+        standardTaskDetail = "本轮抢答结束";
+      } else {
+        standardTaskTone = "border-emerald-200 bg-white";
+        standardTaskTitle = "提交抢答";
+        standardTaskDetail = "输入答案后提交";
+      }
+    } else if (!isBuzzerMode && myBuzzerAnswer?.status === "pending") {
+      standardTaskTitle = "等待判定";
+      standardTaskDetail = `已提交：${myBuzzerAnswer.answerText}`;
+    } else if (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") {
+      standardTaskTitle = "本轮已答错";
+      standardTaskDetail = "等待下一轮";
+    } else if (isRoundEnded) {
+      standardTaskTitle = "等待判定";
+      standardTaskDetail = "本轮已结束";
+    } else if (myHasForfeited) {
+      standardTaskTone = "border-slate-200 bg-white";
+      standardTaskTitle = "已放弃";
+      standardTaskDetail = hasUnsubmittedGuessers ? "可提交答案或取消放弃" : "等待结算";
+    } else if (myAnswer) {
+      standardTaskTone = "border-emerald-200 bg-white";
+      standardTaskTitle = "已提交答案";
+      standardTaskDetail = "截止前可修改";
+    } else {
+      standardTaskTone = "border-emerald-200 bg-white";
+      standardTaskTitle = "输入答案";
+      standardTaskDetail = "提交后可修改";
+    }
+  }
+
+  useEffect(() => {
+    if (!canPreviewSelectedBlocks) {
+      setIsRevealPreviewOpen(false);
+      return;
+    }
+
+    function isTypingTarget(target: EventTarget | null) {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+
+      return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key.toLowerCase() !== "v" || event.repeat || isTypingTarget(event.target)) {
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && activeElement.closest("[data-reveal-grid-button='true']")) {
+        activeElement.blur();
+      }
+      setIsRevealPreviewOpen(true);
+    }
+
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.key.toLowerCase() === "v") {
+        setIsRevealPreviewOpen(false);
+      }
+    }
+
+    function handleBlur() {
+      setIsRevealPreviewOpen(false);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [canPreviewSelectedBlocks]);
 
   useEffect(() => {
     setLabelInput("");
@@ -1116,6 +1329,51 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function handleSubmitForfeitAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSubmittingAnswer(true);
+    try {
+      const submitted = await submitForfeitAnswer({
+        gameSessionId: gameSession.id,
+        playerId,
+      });
+      setMyAnswer(submitted);
+      setMyBuzzerAnswer(null);
+      setAnswerText("");
+      await refreshRoundData(gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "放弃本轮失败。");
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  }
+
+  async function handleCancelForfeitAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSubmittingAnswer(true);
+    try {
+      const canceled = await cancelForfeitAnswer({
+        gameSessionId: gameSession.id,
+        playerId,
+      });
+      setGameSession(canceled.gameSession);
+      setMyAnswer(null);
+      setAnswerText("");
+      setRemainingSeconds(getRemainingSeconds(canceled.gameSession.roundStartedAt, canceled.gameSession.roundSeconds));
+      await refreshRoundData(canceled.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "取消放弃失败。");
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  }
+
   async function handleSubmitBuzzerAnswer() {
     if (!gameSession) {
       return;
@@ -1155,7 +1413,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setRemainingSeconds(getRemainingSeconds(judged.gameSession.roundStartedAt, judged.gameSession.roundSeconds));
       await refreshRoundData(judged.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "判定抢答失败。");
+      onError(error instanceof Error ? error.message : "判定答案失败。");
     } finally {
       setIsJudgingBuzzer(false);
     }
@@ -1176,7 +1434,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setRemainingSeconds(getRemainingSeconds(settled.gameSession.roundStartedAt, settled.gameSession.roundSeconds));
       await refreshRoundData(settled.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "结算抢答轮次失败。");
+      onError(error instanceof Error ? error.message : "结算本轮失败。");
     } finally {
       setIsSettlingBuzzerRound(false);
     }
@@ -1277,32 +1535,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
-  async function handleEndGameEarly() {
-    if (!gameSession) {
-      return;
-    }
-
-    const confirmed = window.confirm("确定要提前结束本局游戏并进入排行榜吗？");
-
-    if (!confirmed) {
-      return;
-    }
-
-    setIsEndingGame(true);
-    try {
-      const ended = await endCurrentGameEarly({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      setGameSession(ended.gameSession);
-      onRoomUpdated?.(ended.room);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "提前结束本局失败。");
-    } finally {
-      setIsEndingGame(false);
-    }
-  }
-
   if (isLoading) {
     return <p className="text-sm text-[var(--muted)]">正在加载当前题目...</p>;
   }
@@ -1383,6 +1615,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               const alreadyCorrect = correctPlayerSet.has(player.id);
               const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
               const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
+              const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
               return (
                 <div
                   className="rounded-md bg-slate-50 px-3 py-2 text-sm"
@@ -1399,8 +1632,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
                     <span>答对 {correctCount} 题</span>
-                    {!isPresenter && alreadyCorrect ? (
+                    {alreadyCorrect ? (
                       <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                    ) : null}
+                    {currentQuestionScoreAwarded > 0 ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                        +{currentQuestionScoreAwarded} 分
+                      </span>
                     ) : null}
                     {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
                       <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
@@ -1412,9 +1650,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     ) : null}
                     {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
                       <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
-                    ) : null}
-                    {isBuzzerMode && alreadyCorrect ? (
-                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
                     ) : null}
                   </div>
                 </div>
@@ -1541,11 +1776,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 <button
                   aria-label={`块 ${blockIndex + 1}`}
                   className={[
-                    "border border-white/60 transition",
+                    "border border-white/60 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-rose-200",
                     isRevealed ? "bg-emerald-400/30" : "",
                     isSelected ? "bg-rose-500/45" : "",
                     !isRevealed && !isSelected ? "hover:bg-rose-300/25" : "",
                   ].join(" ")}
+                  data-reveal-grid-button="true"
                   disabled={isRevealed || (Boolean(gameSession.roundStartedAt) && remainingSeconds > 0)}
                   key={blockIndex}
                   type="button"
@@ -1790,125 +2026,216 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
                 {isSkippingQuestion ? "公布中..." : "公布答案"}
               </Button>
-              <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-                {isEndingGame ? "结束中..." : "结束本局"}
-              </Button>
             </div>
           ) : null}
         </div>
       ) : isPresenter ? (
-        <>
-          <p className="text-sm font-semibold text-slate-950">出题人操作</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            已揭露 {revealedBlockSet.size} / {TOTAL_BLOCKS} 块，本轮已选择 {selectedBlocks.length} 块。
-          </p>
-          {isBuzzerMode ? (
-            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <p className="font-semibold text-slate-950">抢答队列</p>
-              {currentBuzzerAnswer ? (
-                <div className="mt-2 rounded-md bg-slate-50 p-3">
-                  <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
-                  <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
-                      答对
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={() => handleJudgeBuzzerAnswer(false)}
-                      disabled={!canJudgeBuzzer || isJudgingBuzzer}
-                    >
-                      答错
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-2 text-[var(--muted)]">{hasRoundStarted ? "当前没有待判定抢答。" : "揭露后开始抢答。"}</p>
-              )}
-              <p className="mt-2 text-xs text-[var(--muted)]">
-                已排队 {pendingBuzzerAnswers.length} 人，本轮已用机会 {buzzerAnswers.length} / {activeGuessers.length}。
-              </p>
-            </div>
-          ) : null}
-          <div className="mt-3 grid gap-2">
-            <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-              {isConfirmingReveal ? "确认中..." : "确认揭露"}
-            </Button>
-            <button
-              className="rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={imageLoadFailed || selectedBlocks.length === 0}
-              type="button"
-              onBlur={() => setIsRevealPreviewOpen(false)}
-              onContextMenu={(event) => event.preventDefault()}
-              onPointerCancel={() => setIsRevealPreviewOpen(false)}
-              onPointerDown={() => setIsRevealPreviewOpen(true)}
-              onPointerLeave={() => setIsRevealPreviewOpen(false)}
-              onPointerUp={() => setIsRevealPreviewOpen(false)}
-            >
-              按住预览玩家视角
-            </button>
-            {isBuzzerMode ? (
-              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
-                {isSettlingBuzzerRound ? "结算中..." : "结算本轮抢答"}
-              </Button>
-            ) : (
-              <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
-                判分
-              </Button>
-            )}
-            <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-              {isSkippingQuestion ? "跳过中..." : "跳过本题"}
-            </Button>
-            <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-              {isEndingGame ? "结束中..." : "结束本局游戏"}
-            </Button>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-950">本轮</p>
+            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
           </div>
-        </>
-      ) : (
-        <>
-          <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm">
-            <span className="text-[var(--muted)]">倒计时</span>
-            <span className="font-semibold text-slate-950">{hasRoundStarted ? `${remainingSeconds} 秒` : "等待开始"}</span>
-          </div>
-          {isCurrentPlayerCorrect ? (
-            <p className="text-sm font-semibold text-emerald-700">你已答对本题，后续轮次无需继续作答。</p>
-          ) : !hasRoundStarted ? (
-            <p className="text-sm text-[var(--muted)]">等待出题人揭露图片后开始答题。</p>
-          ) : (
-            <div className="space-y-3">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
-                <input
-                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  disabled={!isRoundActive || (isBuzzerMode && Boolean(myBuzzerAnswer))}
-                  maxLength={80}
-                  placeholder="输入动画名称"
-                  value={answerText}
-                  onChange={(event) => setAnswerText(event.target.value)}
-                />
-              </label>
-              <Button
-                className="w-full"
-                type="button"
-                onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
-                disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
+
+          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+              <span
+                className={[
+                  "rounded px-2 py-1 text-xs font-bold",
+                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                ].join(" ")}
               >
-                {isSubmittingAnswer ? "提交中..." : isBuzzerMode ? "提交抢答" : myAnswer ? "修改答案" : "提交答案"}
-              </Button>
-              <p className="text-sm text-[var(--muted)]">
-                {isBuzzerMode
-                  ? myBuzzerAnswer
-                    ? `本轮已抢答：${myBuzzerAnswer.answerText}`
-                    : "本轮尚未抢答"
-                  : myAnswer
-                    ? `已提交：${myAnswer.answerText}`
-                    : "本轮尚未提交答案"}
-                {isRoundEnded ? "，本轮已结束" : ""}
-              </p>
+                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+              </span>
             </div>
-          )}
-        </>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
+          </section>
+
+          {hasRoundStarted ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                <span className="font-bold text-slate-950">
+                  {standardSubmittedCount}/{standardTotalCount}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full bg-slate-900"
+                  style={{ width: `${Math.min(100, standardProgress)}%` }}
+                />
+              </div>
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              <span className="text-xs font-semibold text-[var(--muted)]">
+                已揭露 {revealedBlockSet.size}/{TOTAL_BLOCKS}
+              </span>
+            </div>
+
+            {hasRoundStarted ? (
+              <div className="mb-3 rounded-md bg-white p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold text-slate-950">{isBuzzerMode ? "抢答队列" : "待判定答案"}</p>
+                  <span className="text-xs font-semibold text-[var(--muted)]">{pendingBuzzerAnswers.length} 人待判定</span>
+                </div>
+                {currentBuzzerAnswer ? (
+                  <div className="mt-2 rounded-md bg-slate-50 p-3">
+                    <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
+                    <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
+                        答对
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => handleJudgeBuzzerAnswer(false)}
+                        disabled={!canJudgeBuzzer || isJudgingBuzzer}
+                      >
+                        答错
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
+                    {isBuzzerMode ? "当前没有待判定抢答。" : "当前没有待判定答案。"}
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            <div className="grid gap-2">
+              <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
+                {isConfirmingReveal ? "确认中..." : selectedBlocks.length > 0 ? `确认揭露 ${selectedBlocks.length} 格` : "确认揭露"}
+              </Button>
+              {canPreviewSelectedBlocks ? (
+                <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
+                  按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览玩家视角
+                </p>
+              ) : null}
+              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
+                {isSettlingBuzzerRound ? "处理中..." : standardSettleActionText}
+              </Button>
+              <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+                {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-950">本轮</p>
+            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
+          </div>
+
+          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+              <span
+                className={[
+                  "rounded px-2 py-1 text-xs font-bold",
+                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                ].join(" ")}
+              >
+                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+              </span>
+            </div>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
+          </section>
+
+          {hasRoundStarted ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                <span className="font-bold text-slate-950">
+                  {standardSubmittedCount}/{standardTotalCount}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full bg-slate-900"
+                  style={{ width: `${Math.min(100, standardProgress)}%` }}
+                />
+              </div>
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <p className="mb-3 text-sm font-semibold text-slate-950">操控面板</p>
+            {isCurrentPlayerCorrect ? (
+              <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                你已答对本题。
+              </p>
+            ) : !hasRoundStarted ? (
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人揭露图片。</p>
+            ) : (
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
+                  <input
+                    className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                    disabled={
+                      !isRoundActive ||
+                      (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
+                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") ||
+                      (myHasForfeited && !hasUnsubmittedGuessers)
+                    }
+                    maxLength={80}
+                    placeholder="输入动画名称"
+                    value={answerText}
+                    onChange={(event) => setAnswerText(event.target.value)}
+                  />
+                </label>
+                <Button
+                  className="w-full"
+                  type="button"
+                  onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
+                  disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
+                >
+                  {isSubmittingAnswer
+                    ? "提交中..."
+                    : isBuzzerMode
+                      ? "提交抢答"
+                      : myHasForfeited
+                        ? "提交答案"
+                        : myAnswer
+                          ? "修改答案"
+                          : "提交答案"}
+                </Button>
+                {!isBuzzerMode ? (
+                  <Button
+                    className="w-full"
+                    type="button"
+                    variant="secondary"
+                    onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
+                    disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                  >
+                    {isSubmittingAnswer ? "处理中..." : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                  </Button>
+                ) : null}
+                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                  {isBuzzerMode
+                    ? myBuzzerAnswer
+                      ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                      : "本轮尚未抢答"
+                    : myBuzzerAnswer?.status === "wrong"
+                      ? `本轮已答错：${myBuzzerAnswer.answerText}`
+                    : myAnswer
+                      ? getAnswerDisplayText(myAnswer)
+                      : "本轮尚未提交答案"}
+                  {isRoundEnded ? "，本轮已结束" : ""}
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
       )}
     </div>
   );
@@ -2165,7 +2492,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                         {player.nickname}
                         {alreadyCorrect ? "（已答对）" : ""}
                       </span>
-                      <span className="mt-1 block text-[var(--muted)]">{answer?.answerText || "本轮未提交"}</span>
+                      <span className="mt-1 block text-[var(--muted)]">{answer ? getAnswerDisplayText(answer) : "本轮未提交"}</span>
                     </span>
                   </label>
                 );

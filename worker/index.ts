@@ -50,6 +50,8 @@ const MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
   "confirmRevealBlocks",
   "submitAnswer",
+  "submitForfeitAnswer",
+  "cancelForfeitAnswer",
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",
   "settleBuzzerRound",

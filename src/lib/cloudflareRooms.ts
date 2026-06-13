@@ -119,7 +119,7 @@ export const getPlayersByRoomId = (roomId: string) => rpc<Player[]>("getPlayersB
 export const joinRoom = (roomCode: string, playerId: string, nickname: string) =>
   rpc<{ room: Room | null; error: string | null }>("joinRoom", roomCode, playerId, nickname);
 
-export const leaveRoom = (roomId: string, playerId: string) => rpc<void>("leaveRoom", roomId, playerId);
+export const leaveRoom = (roomId: string, playerId: string) => rpc<Room | null>("leaveRoom", roomId, playerId);
 
 export const dissolveRoom = (roomId: string, playerId: string) => rpc<void>("dissolveRoom", roomId, playerId);
 
@@ -246,6 +246,12 @@ export const getQuestionResultsForQuestion = (params: { gameSessionId: string; q
 
 export const submitAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
   rpc<Answer>("submitAnswer", params);
+
+export const submitForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
+  rpc<Answer>("submitForfeitAnswer", params);
+
+export const cancelForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
+  rpc<{ gameSession: GameSession; canceledAnswerId: string }>("cancelForfeitAnswer", params);
 
 export const submitBuzzerAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
   rpc<BuzzerAnswer>("submitBuzzerAnswer", params);

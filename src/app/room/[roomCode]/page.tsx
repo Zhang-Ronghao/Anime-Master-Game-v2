@@ -657,6 +657,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isCancelingRound, setIsCancelingRound] = useState(false);
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
+  const [isLeavingRoom, setIsLeavingRoom] = useState(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
@@ -818,11 +819,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   async function handleBackHome() {
     try {
       if (room?.id && playerId) {
-        if (isHost) {
-          await dissolveRoom(room.id, playerId);
-        } else {
-          await leaveRoom(room.id, playerId);
-        }
+        await leaveRoom(room.id, playerId);
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "离开房间失败，请稍后重试。");
@@ -831,6 +828,25 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
 
     clearLocalRoomSession();
     router.push("/");
+  }
+
+  async function handleExitRoom() {
+    if (!room?.id || !playerId || isCurrentPresenter) {
+      return;
+    }
+
+    setIsLeavingRoom(true);
+    setError("");
+
+    try {
+      await leaveRoom(room.id, playerId);
+      clearLocalRoomSession();
+      router.push("/");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "退出房间失败，请稍后重试。");
+    } finally {
+      setIsLeavingRoom(false);
+    }
   }
 
   async function handleDissolveRoom() {
@@ -996,21 +1012,19 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
               setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : nextRoom))
             }
           />
-          <div className="flex flex-wrap justify-end gap-3">
-            <Button type="button" variant="secondary" onClick={handleBackHome}>
-              返回首页
-            </Button>
-            {isHost ? (
-              <>
+          {isHost || !isCurrentPresenter ? (
+            <div className="flex flex-wrap justify-end gap-3">
+              {isHost ? (
                 <Button type="button" variant="secondary" onClick={handleCancelRound} disabled={isCancelingRound}>
-                  {isCancelingRound ? "取消中..." : "取消本局"}
+                  {isCancelingRound ? "返回中..." : "返回大厅"}
                 </Button>
-                <Button type="button" variant="secondary" onClick={handleDissolveRoom} disabled={isDissolving}>
-                  {isDissolving ? "解散中..." : "解散房间"}
+              ) : (
+                <Button type="button" variant="secondary" onClick={handleExitRoom} disabled={isLeavingRoom}>
+                  {isLeavingRoom ? "退出中..." : "退出房间"}
                 </Button>
-              </>
-            ) : null}
-          </div>
+              )}
+            </div>
+          ) : null}
         </main>
       ) : (
         <div className={shouldShowLobby ? "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]" : "grid gap-5"}>
