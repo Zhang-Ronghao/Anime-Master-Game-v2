@@ -603,6 +603,7 @@ async function getDbPlayersByRoomId(roomId: string) {
     .select("*")
     .eq("room_id", roomId)
     .order("joined_at", { ascending: true })
+    .order("id", { ascending: true })
     .returns<DbPlayer[]>();
 
   if (error) {

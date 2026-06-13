@@ -151,23 +151,17 @@ function getRoomCodeFromLocation() {
   return roomMatch ? decodeURIComponent(roomMatch[1]) : "";
 }
 
-function PlayerPill({ player, playerId, presenterPlayerId }: { player: Player; playerId: string; presenterPlayerId?: string | null }) {
-  const isPresenter = player.id === presenterPlayerId;
+function getPlayerJoinedAtTime(player: Player) {
+  if (typeof player.joinedAt === "number") {
+    return player.joinedAt;
+  }
 
-  return (
-    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3">
-      <div className="min-w-0">
-        <p className="truncate font-semibold text-slate-950">{player.nickname}</p>
-        <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-          {player.id === playerId ? <span>你</span> : null}
-          {isPresenter ? <span>本局出题人</span> : null}
-        </div>
-      </div>
-      <span className={player.isHost ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700" : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"}>
-        {player.isHost ? "房主" : "玩家"}
-      </span>
-    </div>
-  );
+  const timestamp = Date.parse(player.joinedAt);
+  return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+}
+
+function sortPlayersByJoinedAt(players: Player[]) {
+  return [...players].sort((a, b) => getPlayerJoinedAtTime(a) - getPlayerJoinedAtTime(b) || a.id.localeCompare(b.id));
 }
 
 function PlayerList({
@@ -181,47 +175,13 @@ function PlayerList({
   presenterPlayerId?: string | null;
   gameMode: GameMode;
 }) {
-  const title = `玩家 ${players.length}`;
-
-  if (gameMode === "TEAM_BATTLE") {
-    const presenter = players.find((player) => player.id === presenterPlayerId);
-    const guessers = players.filter((player) => player.id !== presenterPlayerId);
-
-    return (
-      <Panel className="h-full" title={title}>
-        <div className="space-y-3">
-          {presenter ? (
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-slate-950">出题人</p>
-                <span className="rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700">裁判</span>
-              </div>
-              <PlayerPill player={presenter} playerId={playerId} presenterPlayerId={presenterPlayerId} />
-            </div>
-          ) : null}
-          <div className="rounded-md border border-[var(--line)] bg-white p-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-slate-950">答题玩家</p>
-            </div>
-            <div className="grid gap-2">
-              {guessers.length > 0 ? (
-                guessers.map((player) => (
-                  <PlayerPill key={player.id} player={player} playerId={playerId} presenterPlayerId={presenterPlayerId} />
-                ))
-              ) : (
-                <p className="text-sm text-[var(--muted)]">等待答题玩家加入。</p>
-              )}
-            </div>
-          </div>
-        </div>
-      </Panel>
-    );
-  }
+  const sortedPlayers = sortPlayersByJoinedAt(players);
+  const title = `玩家 ${sortedPlayers.length}`;
 
   return (
     <Panel className="h-full" title={title}>
       <div className="space-y-3">
-        {players.map((player) => {
+        {sortedPlayers.map((player, index) => {
           const isPresenter = player.id === presenterPlayerId;
 
           return (
@@ -231,13 +191,14 @@ function PlayerList({
             >
               <div className="flex min-w-0 items-center gap-3">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">
-                  {player.nickname.slice(0, 1).toUpperCase()}
+                  {index + 1}
                 </div>
                 <div className="min-w-0">
                   <p className="truncate font-semibold">{player.nickname}</p>
                   <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
                     {player.id === playerId ? <span>你</span> : null}
                     {isPresenter ? <span>本局出题人</span> : null}
+                    {gameMode === "TEAM_BATTLE" ? <span>{isPresenter ? "裁判" : "答题玩家"}</span> : null}
                   </div>
                 </div>
               </div>
