@@ -1542,6 +1542,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  function handleAnswerInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || !isBuzzerMode || !canSubmitBuzzerAnswer || isSubmittingAnswer) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSubmitBuzzerAnswer();
+  }
+
   async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
     if (!gameSession || !currentBuzzerAnswer) {
       return;
@@ -2358,6 +2367,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     placeholder="输入动画名称"
                     value={answerText}
                     onChange={(event) => setAnswerText(event.target.value)}
+                    onKeyDown={handleAnswerInputKeyDown}
                   />
                 </label>
                 <Button
@@ -2369,7 +2379,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   {isSubmittingAnswer
                     ? "提交中..."
                     : isBuzzerMode
-                      ? "提交抢答"
+                      ? "提交抢答（回车）"
                       : myHasForfeited
                         ? "提交答案"
                         : myAnswer
