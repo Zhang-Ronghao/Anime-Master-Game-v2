@@ -244,6 +244,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [selectedCorrectPlayerIds, setSelectedCorrectPlayerIds] = useState<string[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
+  const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
@@ -610,7 +611,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
   const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
   const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
-    ? Math.max(0, Math.ceil((new Date(teamBattleState.voteDeadlineAt).getTime() - Date.now()) / 1000))
+    ? Math.max(0, Math.ceil((new Date(teamBattleState.voteDeadlineAt).getTime() - teamBattleClockMs) / 1000))
     : null;
   const teamBattleRevealVoteCounts = useMemo(() => {
     const counts: Record<number, number> = {};
@@ -746,6 +747,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     return () => window.clearTimeout(timer);
   }, [gameSession, isFinalizingTeamBattle, onError, refreshRoundData, teamBattleState?.voteDeadlineAt]);
+
+  useEffect(() => {
+    if (!teamBattleState?.voteDeadlineAt) {
+      return;
+    }
+
+    setTeamBattleClockMs(Date.now());
+    const timer = window.setInterval(() => {
+      setTeamBattleClockMs(Date.now());
+    }, 250);
+
+    return () => window.clearInterval(timer);
+  }, [teamBattleState?.voteDeadlineAt]);
 
   async function saveQuestionLabel(params: { labelText: string; source: "manual" | "answer"; answerId?: string | null }) {
     if (!gameSession || !currentQuestion || !canAddQuestionLabel) {
@@ -1550,7 +1564,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <p className="font-semibold text-slate-950">
                 {getTeamName(teamBattleState.pendingGuess.team)}猜测
               </p>
-              <p className="mt-2 break-words text-lg font-semibold text-slate-950">{teamBattleState.pendingGuess.answerText}</p>
+              <p className="mt-2 break-words text-lg font-semibold text-slate-950">
+                {teamBattleState.pendingGuess.answerText}
+              </p>
               {isPresenter ? (
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>
