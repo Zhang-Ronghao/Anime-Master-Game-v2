@@ -122,12 +122,12 @@ function toGameSession(gameSession: DbGameSession): GameSession {
   };
 }
 
-function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS) {
+function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS, nowMs = Date.now()) {
   if (!roundStartedAt) {
     return roundSeconds;
   }
 
-  const elapsedSeconds = Math.floor((Date.now() - new Date(roundStartedAt).getTime()) / 1000);
+  const elapsedSeconds = Math.floor((nowMs - new Date(roundStartedAt).getTime()) / 1000);
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
 }
 
@@ -367,11 +367,66 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
+  const answerInputRef = useRef<HTMLInputElement | null>(null);
+  const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
     [room.players],
   );
+
+  function syncServerClock(nextGameSession: GameSession) {
+    if (!nextGameSession.serverNow) {
+      return;
+    }
+
+    const serverNowMs = new Date(nextGameSession.serverNow).getTime();
+    if (Number.isFinite(serverNowMs)) {
+      serverClockRef.current = {
+        serverNowMs,
+        clientNowMs: performance.now(),
+      };
+    }
+  }
+
+  function getEstimatedServerNowMs() {
+    const serverClock = serverClockRef.current;
+    if (!serverClock) {
+      return Date.now();
+    }
+
+    return serverClock.serverNowMs + (performance.now() - serverClock.clientNowMs);
+  }
+
+  function getClientRoundElapsedMs(targetGameSession: GameSession) {
+    if (!targetGameSession.roundStartedAt) {
+      return null;
+    }
+
+    const roundStartedAtMs = new Date(targetGameSession.roundStartedAt).getTime();
+    if (!Number.isFinite(roundStartedAtMs)) {
+      return null;
+    }
+
+    return Math.max(0, getEstimatedServerNowMs() - roundStartedAtMs);
+  }
+
+  function applyGameSession(nextGameSession: GameSession, options: { syncClock?: boolean } = {}) {
+    const shouldSyncClock = options.syncClock ?? true;
+    if (shouldSyncClock) {
+      syncServerClock(nextGameSession);
+    }
+    setGameSession(nextGameSession);
+    const nowMs =
+      shouldSyncClock || serverClockRef.current ? getEstimatedServerNowMs() : new Date(nextGameSession.serverNow ?? "").getTime();
+    setRemainingSeconds(
+      getRemainingSeconds(
+        nextGameSession.roundStartedAt,
+        nextGameSession.roundSeconds,
+        Number.isFinite(nowMs) ? nowMs : Date.now(),
+      ),
+    );
+  }
 
   const refreshRoundData = useCallback(
     async (targetGameSession: GameSession) => {
@@ -539,10 +594,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         const loadedQuestions = await getQuestionsByQuestionSetId(loadedGameSession.questionSetId);
 
         if (isMounted) {
-          setGameSession(loadedGameSession);
+          applyGameSession(loadedGameSession);
           setQuestions(loadedQuestions);
           setImageLoadFailed(false);
-          setRemainingSeconds(getRemainingSeconds(loadedGameSession.roundStartedAt, loadedGameSession.roundSeconds));
           await refreshRoundData(loadedGameSession);
         }
       } catch (error) {
@@ -584,11 +638,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           return false;
         }
 
-        setGameSession(pushedGameSession);
+        applyGameSession(pushedGameSession, { syncClock: !serverClockRef.current });
         setImageLoadFailed(false);
         setSelectedBlocks([]);
         setSelectedCorrectPlayerIds([]);
-        setRemainingSeconds(getRemainingSeconds(pushedGameSession.roundStartedAt, pushedGameSession.roundSeconds));
         refreshRoundData(pushedGameSession).catch((error) => {
           onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
         });
@@ -663,12 +716,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           }
 
           const nextQuestions = await getQuestionsByQuestionSetId(nextGameSession.questionSetId);
-          setGameSession(nextGameSession);
+          applyGameSession(nextGameSession);
           setQuestions(nextQuestions);
           setImageLoadFailed(false);
           setSelectedBlocks([]);
           setSelectedCorrectPlayerIds([]);
-          setRemainingSeconds(getRemainingSeconds(nextGameSession.roundStartedAt, nextGameSession.roundSeconds));
           await refreshRoundData(nextGameSession);
         })
         .catch((error) => {
@@ -687,7 +739,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRemainingSeconds(getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds));
+      setRemainingSeconds(
+        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, getEstimatedServerNowMs()),
+      );
     }, 500);
 
     return () => window.clearInterval(timer);
@@ -1003,6 +1057,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !myBuzzerAnswer &&
     isRoundActive &&
     answerText.trim().length > 0;
+  const canTypeBuzzerAnswer =
+    !isPresenter &&
+    isBuzzerMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    !myBuzzerAnswer &&
+    isRoundActive;
   const canGrade = false;
   const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
@@ -1017,6 +1078,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canPreviewTeamBattleOriginal =
     isPresenter && isTeamBattleMode && Boolean(teamBattleState) && !isQuestionReviewing && !imageLoadFailed;
   const canHoldRevealPreview = canPreviewSelectedBlocks || canPreviewTeamBattleOriginal;
+
+  useEffect(() => {
+    if (!canTypeBuzzerAnswer || !gameSession?.roundStartedAt) {
+      return;
+    }
+
+    const focusTimer = window.setTimeout(() => {
+      answerInputRef.current?.focus();
+      answerInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [
+    canTypeBuzzerAnswer,
+    gameSession?.currentQuestionIndex,
+    gameSession?.currentRevealRound,
+    gameSession?.roundStartedAt,
+  ]);
+
   const standardModeLabel = isBuzzerMode ? "抢答" : "轮揭";
   const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
   const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
@@ -1204,7 +1284,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setIsFinalizingTeamBattle(true);
       finalizeTeamBattleVote({ gameSessionId: gameSession.id })
         .then(async (finalized) => {
-          setGameSession(finalized.gameSession);
+          applyGameSession(finalized.gameSession);
           setSelectedBlocks([]);
           setTeamSelectedBlocks([]);
           await refreshRoundData(finalized.gameSession);
@@ -1345,9 +1425,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         selectedBlocks,
       });
-      setGameSession(updatedGameSession);
+      applyGameSession(updatedGameSession);
       setSelectedBlocks([]);
-      setRemainingSeconds(getRemainingSeconds(updatedGameSession.roundStartedAt, updatedGameSession.roundSeconds));
       await refreshRoundData(updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "确认揭露失败。");
@@ -1368,7 +1447,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         playerId,
         selectedBlocks: teamSelectedBlocks,
       });
-      setGameSession(updatedGameSession);
+      applyGameSession(updatedGameSession);
       await refreshRoundData(updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交揭露投票失败。");
@@ -1389,7 +1468,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         playerId,
         vote,
       });
-      setGameSession(updatedGameSession);
+      applyGameSession(updatedGameSession);
       await refreshRoundData(updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交猜测投票失败。");
@@ -1410,7 +1489,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         isCorrect,
       });
-      setGameSession(judged.gameSession);
+      applyGameSession(judged.gameSession);
       setTeamSelectedBlocks([]);
       await refreshRoundData(judged.gameSession);
     } catch (error) {
@@ -1436,7 +1515,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
       });
-      setGameSession(revealed.gameSession);
+      applyGameSession(revealed.gameSession);
       setImageLoadFailed(false);
       setTeamSelectedBlocks([]);
       await refreshRoundData(revealed.gameSession);
@@ -1508,10 +1587,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         playerId,
       });
-      setGameSession(canceled.gameSession);
+      applyGameSession(canceled.gameSession);
       setMyAnswer(null);
       setAnswerText("");
-      setRemainingSeconds(getRemainingSeconds(canceled.gameSession.roundStartedAt, canceled.gameSession.roundSeconds));
       await refreshRoundData(canceled.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "取消放弃失败。");
@@ -1531,6 +1609,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         playerId,
         answerText,
+        clientRoundElapsedMs: getClientRoundElapsedMs(gameSession),
       });
       setMyBuzzerAnswer(submitted);
       setAnswerText(submitted.answerText);
@@ -1564,8 +1643,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         buzzerAnswerId: currentBuzzerAnswer.id,
         isCorrect,
       });
-      setGameSession(judged.gameSession);
-      setRemainingSeconds(getRemainingSeconds(judged.gameSession.roundStartedAt, judged.gameSession.roundSeconds));
+      applyGameSession(judged.gameSession);
       await refreshRoundData(judged.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "判定答案失败。");
@@ -1585,8 +1663,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
       });
-      setGameSession(settled.gameSession);
-      setRemainingSeconds(getRemainingSeconds(settled.gameSession.roundStartedAt, settled.gameSession.roundSeconds));
+      applyGameSession(settled.gameSession);
       await refreshRoundData(settled.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "结算本轮失败。");
@@ -1607,11 +1684,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         correctPlayerIds: selectedCorrectPlayerIds,
       });
-      setGameSession(graded.gameSession);
+      applyGameSession(graded.gameSession);
       setImageLoadFailed(false);
       setSelectedCorrectPlayerIds([]);
       setSelectedBlocks([]);
-      setRemainingSeconds(getRemainingSeconds(graded.gameSession.roundStartedAt, graded.gameSession.roundSeconds));
 
       if (graded.room) {
         onRoomUpdated?.(graded.room);
@@ -1643,11 +1719,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
       });
-      setGameSession(skipped.gameSession);
+      applyGameSession(skipped.gameSession);
       setImageLoadFailed(false);
       setSelectedBlocks([]);
       setSelectedCorrectPlayerIds([]);
-      setRemainingSeconds(getRemainingSeconds(skipped.gameSession.roundStartedAt, skipped.gameSession.roundSeconds));
 
       if (skipped.room) {
         onRoomUpdated?.(skipped.room);
@@ -1672,11 +1747,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
       });
-      setGameSession(advanced.gameSession);
+      applyGameSession(advanced.gameSession);
       setImageLoadFailed(false);
       setSelectedBlocks([]);
       setSelectedCorrectPlayerIds([]);
-      setRemainingSeconds(getRemainingSeconds(advanced.gameSession.roundStartedAt, advanced.gameSession.roundSeconds));
 
       if (advanced.room) {
         onRoomUpdated?.(advanced.room);
@@ -2356,6 +2430,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
                   <input
+                    ref={answerInputRef}
                     className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                     disabled={
                       !isRoundActive ||

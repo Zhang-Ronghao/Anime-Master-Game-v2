@@ -253,7 +253,7 @@ export const submitForfeitAnswer = (params: { gameSessionId: string; playerId: s
 export const cancelForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
   rpc<{ gameSession: GameSession; canceledAnswerId: string }>("cancelForfeitAnswer", params);
 
-export const submitBuzzerAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
+export const submitBuzzerAnswer = (params: { gameSessionId: string; playerId: string; answerText: string; clientRoundElapsedMs?: number | null }) =>
   rpc<BuzzerAnswer>("submitBuzzerAnswer", params);
 
 export const judgeBuzzerAnswer = (params: {

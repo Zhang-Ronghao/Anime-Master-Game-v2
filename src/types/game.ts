@@ -114,6 +114,7 @@ export type GameSession = {
   roundSeconds: number;
   roundScores: number[];
   roundStartedAt?: string | null;
+  serverNow?: string;
   teamBattleState?: TeamBattleState | null;
   createdAt: string;
   endedAt?: string | null;

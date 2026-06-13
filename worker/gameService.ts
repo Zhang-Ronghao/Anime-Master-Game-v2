@@ -136,6 +136,7 @@ function toGameSession(gameSession: DbGameSession): GameSession {
     roundSeconds: gameSession.round_seconds ?? 60,
     roundScores,
     roundStartedAt: gameSession.round_started_at,
+    serverNow: new Date().toISOString(),
     teamBattleState,
     createdAt: gameSession.created_at,
     endedAt: gameSession.ended_at,
@@ -410,6 +411,7 @@ const REVEAL_BLOCK_COUNT = 45;
 const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index) => index);
 const MAX_PLAYERS_PER_ROOM = 15;
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
+const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 export type QuestionImportItem = {
@@ -2260,6 +2262,7 @@ export async function submitBuzzerAnswer(params: {
   gameSessionId: string;
   playerId: string;
   answerText: string;
+  clientRoundElapsedMs?: number | null;
 }) {
   assertD1Env();
 
@@ -2283,9 +2286,21 @@ export async function submitBuzzerAnswer(params: {
     throw new Error("本轮尚未开始，暂时不能抢答。");
   }
 
-  if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
+  const roundStartedAtMs = new Date(gameSession.roundStartedAt).getTime();
+  const serverRoundElapsedMs = Date.now() - roundStartedAtMs;
+  const clientRoundElapsedMs = Number.isFinite(params.clientRoundElapsedMs) ? params.clientRoundElapsedMs : null;
+  const canUseClientRoundElapsedMs =
+    typeof clientRoundElapsedMs === "number" &&
+    clientRoundElapsedMs >= 0 &&
+    clientRoundElapsedMs >= serverRoundElapsedMs - BUZZER_CLIENT_TIME_MAX_EARLY_MS;
+  const effectiveRoundElapsedMs = canUseClientRoundElapsedMs ? clientRoundElapsedMs : serverRoundElapsedMs;
+  const roundDurationMs = gameSession.roundSeconds * 1000;
+
+  if (effectiveRoundElapsedMs >= roundDurationMs) {
     throw new Error("本轮抢答时间已结束，不能再提交。");
   }
+
+  const submittedAt = new Date(roundStartedAtMs + effectiveRoundElapsedMs).toISOString();
 
   const { data: existingResult, error: resultError } = await d1
     .from("question_results")
@@ -2311,7 +2326,7 @@ export async function submitBuzzerAnswer(params: {
       reveal_round: gameSession.currentRevealRound,
       player_id: params.playerId,
       answer_text: answerText,
-      submitted_at: new Date().toISOString(),
+      submitted_at: submittedAt,
     })
     .select()
     .single<DbBuzzerAnswer>();
