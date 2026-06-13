@@ -62,6 +62,8 @@ const PORTRAIT_GRID_COLUMNS = 5;
 const TOTAL_BLOCKS = 45;
 const DEFAULT_ROUND_SECONDS = 60;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
+const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
 
 function isForfeitAnswer(answer: Answer | null | undefined) {
   return answer?.answerText === FORFEIT_ANSWER_TEXT;
@@ -73,6 +75,19 @@ function getAnswerDisplayText(answer: Answer | null | undefined) {
   }
 
   return isForfeitAnswer(answer) ? "已放弃" : answer.answerText;
+}
+
+function buildRetryImageUrl(imageUrl: string, retryAttempt: number, retryToken: number) {
+  if (retryAttempt <= 0 && retryToken <= 0) {
+    return imageUrl;
+  }
+
+  const hashIndex = imageUrl.indexOf("#");
+  const urlWithoutHash = hashIndex >= 0 ? imageUrl.slice(0, hashIndex) : imageUrl;
+  const hash = hashIndex >= 0 ? imageUrl.slice(hashIndex) : "";
+  const separator = urlWithoutHash.includes("?") ? "&" : "?";
+
+  return `${urlWithoutHash}${separator}amgImageRetry=${retryToken}-${retryAttempt}${hash}`;
 }
 
 function toGameSession(gameSession: DbGameSession): GameSession {
@@ -343,10 +358,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [playerImageRetryAttempt, setPlayerImageRetryAttempt] = useState(0);
+  const [playerImageRetryToken, setPlayerImageRetryToken] = useState(0);
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
   const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
 
@@ -687,6 +705,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     [gameSession?.revealedBlocks, selectedBlocks],
   );
 
+  useEffect(() => {
+    setImageLoadFailed(false);
+    setPlayerImageRetryAttempt(0);
+    setPlayerImageRetryToken(0);
+    playerLoadedImageRef.current = null;
+  }, [currentQuestion?.id]);
+
   useLayoutEffect(() => {
     if (isPresenter || !currentQuestion) {
       return;
@@ -698,6 +723,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
 
     let isCanceled = false;
+    let retryTimer: number | undefined;
     const context = canvas.getContext("2d");
     const fallbackWidth = Math.max(1, canvas.width || 1);
     const fallbackHeight = Math.max(1, canvas.height || 1);
@@ -707,6 +733,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       context.fillStyle = "#000";
     }
     context?.fillRect(0, 0, fallbackWidth, fallbackHeight);
+
+    const cachedImage = playerLoadedImageRef.current;
+    if (
+      cachedImage &&
+      cachedImage.questionId === currentQuestion.id &&
+      cachedImage.imageUrl === currentQuestion.imageUrl &&
+      cachedImage.image.complete
+    ) {
+      drawRevealedBlocksOnCanvas(canvas, cachedImage.image, gameSession?.revealedBlocks ?? []);
+      return;
+    }
 
     const image = new Image();
     image.onload = () => {
@@ -720,21 +757,37 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       }
 
       setImageLoadFailed(false);
+      playerLoadedImageRef.current = { questionId: currentQuestion.id, imageUrl: currentQuestion.imageUrl, image };
       drawRevealedBlocksOnCanvas(canvas, image, gameSession?.revealedBlocks ?? []);
     };
     image.onerror = () => {
-      if (!isCanceled) {
-        setImageLoadFailed(true);
+      if (isCanceled) {
+        return;
       }
+
+      if (playerImageRetryAttempt < MAX_IMAGE_AUTO_RETRY_COUNT) {
+        const retryDelay = IMAGE_RETRY_DELAYS_MS[playerImageRetryAttempt] ?? IMAGE_RETRY_DELAYS_MS.at(-1) ?? 3200;
+        retryTimer = window.setTimeout(() => {
+          if (!isCanceled) {
+            setPlayerImageRetryAttempt((attempt) => Math.min(MAX_IMAGE_AUTO_RETRY_COUNT, attempt + 1));
+          }
+        }, retryDelay);
+        return;
+      }
+
+      setImageLoadFailed(true);
     };
-    image.src = currentQuestion.imageUrl;
+    image.src = buildRetryImageUrl(currentQuestion.imageUrl, playerImageRetryAttempt, playerImageRetryToken);
 
     return () => {
       isCanceled = true;
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
       image.onload = null;
       image.onerror = null;
     };
-  }, [currentQuestion, gameSession?.revealedBlocks, isPresenter, revealedBlocksKey]);
+  }, [currentQuestion, gameSession?.revealedBlocks, isPresenter, playerImageRetryAttempt, playerImageRetryToken, revealedBlocksKey]);
 
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
@@ -859,6 +912,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const teamBattleIsVoteClosed = teamBattleVoteSeconds === 0;
   let teamBattleTaskTitle = "等待本题开始";
   let teamBattleTaskDetail = "观察图片与队伍状态";
+  let teamBattleTaskMeta = "";
   let teamBattleTaskTone = "border-slate-200 bg-white";
   let teamBattleTaskBadge = "待机";
 
@@ -883,12 +937,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
       teamBattleTaskBadge = teamBattleHasSubmittedRevealVote ? "可修改" : "轮到你";
       teamBattleTaskTitle = teamBattleHasSubmittedRevealVote ? "已提交选格" : "点图选格";
-      teamBattleTaskDetail = `${teamSelectedBlocks.length}/${teamBattleRequiredBlockCount} 个`;
+      teamBattleTaskDetail = "";
+      teamBattleTaskMeta = `${teamSelectedBlocks.length}/${teamBattleRequiredBlockCount} 个`;
     } else if (teamBattleCanAct && teamBattleState.phase === "GUESS_VOTE") {
       teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
       teamBattleTaskBadge = teamBattleHasSubmittedGuessVote ? "可修改" : "轮到你";
       teamBattleTaskTitle = teamBattleHasSubmittedGuessVote ? "已提交猜测票" : "投票猜或不猜";
-      teamBattleTaskDetail = teamBattleHasSubmittedGuessVote ? "可改投" : "二选一";
+      teamBattleTaskDetail = "";
+      teamBattleTaskMeta = teamBattleHasSubmittedGuessVote ? "可改投" : "二选一";
     } else if (teamBattleState.phase === "JUDGING") {
       teamBattleTaskTitle = "等待裁判";
       teamBattleTaskDetail = "正在判定";
@@ -958,6 +1014,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
   const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
+  const canPreviewTeamBattleOriginal =
+    isPresenter && isTeamBattleMode && Boolean(teamBattleState) && !isQuestionReviewing && !imageLoadFailed;
+  const canHoldRevealPreview = canPreviewSelectedBlocks || canPreviewTeamBattleOriginal;
   const standardModeLabel = isBuzzerMode ? "抢答" : "轮揭";
   const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
   const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
@@ -1052,7 +1111,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }
 
   useEffect(() => {
-    if (!canPreviewSelectedBlocks) {
+    if (!canHoldRevealPreview) {
       setIsRevealPreviewOpen(false);
       return;
     }
@@ -1096,7 +1155,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [canPreviewSelectedBlocks]);
+  }, [canHoldRevealPreview]);
 
   useEffect(() => {
     setLabelInput("");
@@ -1386,6 +1445,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     } finally {
       setIsSkippingQuestion(false);
     }
+  }
+
+  function handleReloadPlayerImage() {
+    setImageLoadFailed(false);
+    setPlayerImageRetryAttempt(0);
+    playerLoadedImageRef.current = null;
+    setPlayerImageRetryToken((token) => token + 1);
   }
 
   async function handleSubmitAnswer() {
@@ -1777,12 +1843,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
             <div>
               <p className="text-lg font-semibold">图片加载失败</p>
-              <p className="mt-2 text-sm text-slate-300">可能是图片 URL 失效、跨域限制或网络异常。</p>
+              <p className="mt-2 text-sm text-slate-300">
+                {isPresenter ? "可能是图片 URL 失效、跨域限制或网络异常。" : "已自动重试 3 次，可能是图片 URL 失效或网络异常。"}
+              </p>
               {isPresenter ? (
                 <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
                   {isSkippingQuestion ? "跳过中..." : "跳过本题"}
                 </Button>
-              ) : null}
+              ) : (
+                <Button className="mt-4" type="button" variant="secondary" onClick={handleReloadPlayerImage}>
+                  重新加载图片
+                </Button>
+              )}
             </div>
           </div>
         ) : null}
@@ -1917,11 +1989,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </>
       ) : isTeamBattleMode && teamBattleState ? (
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-slate-950">本轮</p>
-            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{teamBattlePhaseLabel}</span>
-          </div>
-
           <section className={["rounded-md border p-4", teamBattleTaskTone].join(" ")}>
             <div className="flex items-center justify-between gap-3">
               <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{teamBattleTaskBadge}</span>
@@ -1931,8 +1998,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 </span>
               ) : null}
             </div>
-            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{teamBattleTaskTitle}</p>
-            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{teamBattleTaskDetail}</p>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">
+              {teamBattleTaskTitle}
+              {teamBattleTaskDetail || teamBattleTaskMeta ? (
+                <span className="ml-2 align-baseline text-sm font-medium text-[var(--muted)]">
+                  {teamBattleTaskDetail || teamBattleTaskMeta}
+                </span>
+              ) : null}
+            </p>
           </section>
 
           {teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE" ? (
@@ -2001,7 +2074,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                       ) : null}
                     </div>
                     {teamBattleGuessOptions.length > 0 ? (
-                      <div className="mt-2 space-y-2">
+                      <div className="mt-2 max-h-48 space-y-2 overflow-y-auto pr-1">
                         {teamBattleGuessOptions.map((option) => (
                           <button
                             className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-default disabled:hover:border-[var(--line)] disabled:hover:bg-slate-50"
@@ -2112,6 +2185,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
           {isPresenter ? (
             <div className="grid gap-2 border-t border-[var(--line)] pt-4">
+              {canPreviewTeamBattleOriginal ? (
+                <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
+                  按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览原图
+                </p>
+              ) : null}
               <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
                 {isSkippingQuestion ? "公布中..." : "公布答案"}
               </Button>
@@ -2432,17 +2510,19 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 }}
               >
                 <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
-                <div
-                  className="absolute inset-0 grid"
-                  style={{
-                    gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
-                    <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
-                  ))}
-                </div>
+                {canPreviewSelectedBlocks ? (
+                  <div
+                    className="absolute inset-0 grid"
+                    style={{
+                      gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                      gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+                      <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>,
             document.body,
