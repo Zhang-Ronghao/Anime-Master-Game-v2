@@ -826,8 +826,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         return currentBlocks.filter((block) => block !== blockIndex);
       }
 
+      if (currentBlocks.length >= teamBattleRequiredBlockCount) {
+        return currentBlocks;
+      }
+
       const nextBlocks = [...currentBlocks, blockIndex].sort((a, b) => a - b);
-      return nextBlocks.slice(Math.max(0, nextBlocks.length - teamBattleRequiredBlockCount));
+      return nextBlocks;
     });
   }
 
@@ -1310,6 +1314,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 teamBattleState?.phase === "REVEAL_VOTE" &&
                 !isRevealed &&
                 teamBattleVoteSeconds !== 0;
+              const canSelectMoreBlocks = teamSelectedBlocks.length < teamBattleRequiredBlockCount;
+              const canPreviewBlock = canPickBlock && !isSelected && canSelectMoreBlocks;
+              const canToggleBlock = canPickBlock && (isSelected || canSelectMoreBlocks);
 
               return (
                 <button
@@ -1317,10 +1324,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   className={[
                     "relative border border-white/45 text-xs font-bold transition disabled:cursor-default",
                     isRevealed ? "bg-transparent" : "bg-black",
-                    isSelected ? "bg-emerald-500/55 ring-2 ring-emerald-300" : "",
-                    canPickBlock && !isSelected ? "hover:bg-emerald-500/35" : "",
+                    isSelected ? "ring-2 ring-inset ring-emerald-300 shadow-[inset_0_0_0_9999px_rgba(5,150,105,0.42)]" : "",
+                    canPreviewBlock
+                      ? "hover:ring-2 hover:ring-inset hover:ring-emerald-200 hover:shadow-[inset_0_0_0_9999px_rgba(16,185,129,0.24)]"
+                      : "",
                   ].join(" ")}
-                  disabled={!canPickBlock}
+                  disabled={!canToggleBlock}
                   key={blockIndex}
                   type="button"
                   onClick={() => toggleTeamBattleBlock(blockIndex)}
