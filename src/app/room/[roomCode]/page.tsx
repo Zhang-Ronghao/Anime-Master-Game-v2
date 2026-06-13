@@ -78,12 +78,55 @@ function getBroadcastQuestionSet(result: unknown) {
   return null;
 }
 
-const gameModeText: Record<GameMode, string> = {
-  ROUND_REVEAL: "轮揭竞答模式",
-  BUZZER_FIRST_CORRECT: "抢答模式 - 首答制",
-  BUZZER_RANKED: "抢答模式 - 排名得分制",
-  TEAM_BATTLE: "红蓝对抗揭图模式",
+type GameModeCopy = {
+  title: string;
+  summary: string;
+  rules: string[];
+  settingsNote?: string;
 };
+
+const gameModeCopy: Record<GameMode, GameModeCopy> = {
+  ROUND_REVEAL: {
+    title: "个人 · 标准模式",
+    summary: "按轮得分，越早猜中分越高",
+    rules: [
+      "出题人逐轮打开画面，默认共 3 轮",
+      "玩家在倒计时内提交答案",
+      "猜中得当前轮分数，默认 3/2/1 分",
+    ],
+  },
+  BUZZER_FIRST_CORRECT: {
+    title: "个人 · 抢答模式",
+    summary: "第一个答对的人得分，本题立即结束",
+    rules: [
+      "出题人逐轮打开画面，默认共 3 轮",
+      "玩家在倒计时内抢答",
+      "第一个答对的人得 1 分，本题立即结束",
+    ],
+  },
+  BUZZER_RANKED: {
+    title: "个人 · 顺位得分模式",
+    summary: "多人可得分，按答对顺序递减",
+    rules: [
+      "出题人逐轮打开画面，默认共 3 轮",
+      "玩家在倒计时内抢答",
+      "多名玩家可答对得分，按答对顺序递减，最低 1 分",
+    ],
+  },
+  TEAM_BATTLE: {
+    title: "团队 · 对抗模式",
+    summary: "两队在同一张截图上较量，谁先猜对谁得分",
+    rules: [
+      "红蓝两队看同一张被遮住的截图",
+      "两队轮流行动，每次打开 1 个区块",
+      "当前队伍可以猜答案；猜对得 1 分，本题立即结束",
+      "猜错后，对方可额外打开 1 个区块",
+    ],
+    settingsNote: "至少需要 2 名答题玩家",
+  },
+};
+
+const gameModeCommonRule = "每题截图会被格子遮住，出题人逐轮打开画面；玩家根据线索猜动画名";
 
 function getPresenterName(players: Player[], presenterPlayerId?: string | null) {
   return players.find((player) => player.id === presenterPlayerId)?.nickname ?? "未选择";
@@ -112,11 +155,11 @@ function PlayerPill({ player, playerId, presenterPlayerId }: { player: Player; p
   const isPresenter = player.id === presenterPlayerId;
 
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-2">
+    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3">
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-slate-950">{player.nickname}</p>
+        <p className="truncate font-semibold text-slate-950">{player.nickname}</p>
         <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-          {player.id === playerId ? <span>当前标签页玩家</span> : null}
+          {player.id === playerId ? <span>你</span> : null}
           {isPresenter ? <span>本局出题人</span> : null}
         </div>
       </div>
@@ -138,13 +181,15 @@ function PlayerList({
   presenterPlayerId?: string | null;
   gameMode: GameMode;
 }) {
+  const title = `玩家 ${players.length}`;
+
   if (gameMode === "TEAM_BATTLE") {
     const presenter = players.find((player) => player.id === presenterPlayerId);
     const guessers = players.filter((player) => player.id !== presenterPlayerId);
 
     return (
-      <Panel title="队伍与玩家">
-        <div className="space-y-4">
+      <Panel className="h-full" title={title}>
+        <div className="space-y-3">
           {presenter ? (
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -157,7 +202,6 @@ function PlayerList({
           <div className="rounded-md border border-[var(--line)] bg-white p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-950">答题玩家</p>
-              <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">开始后随机平均分队</span>
             </div>
             <div className="grid gap-2">
               {guessers.length > 0 ? (
@@ -175,14 +219,14 @@ function PlayerList({
   }
 
   return (
-    <Panel title="玩家列表">
+    <Panel className="h-full" title={title}>
       <div className="space-y-3">
         {players.map((player) => {
           const isPresenter = player.id === presenterPlayerId;
 
           return (
             <div
-              className="flex items-center justify-between rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
+              className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-3 shadow-sm"
               key={player.id}
             >
               <div className="flex min-w-0 items-center gap-3">
@@ -192,7 +236,7 @@ function PlayerList({
                 <div className="min-w-0">
                   <p className="truncate font-semibold">{player.nickname}</p>
                   <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-                    {player.id === playerId ? <span>当前标签页玩家</span> : null}
+                    {player.id === playerId ? <span>你</span> : null}
                     {isPresenter ? <span>本局出题人</span> : null}
                   </div>
                 </div>
@@ -200,8 +244,8 @@ function PlayerList({
               <span
                 className={
                   player.isHost
-                    ? "rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
-                    : "rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
+                    ? "shrink-0 rounded bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700"
+                    : "shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
                 }
               >
                 {player.isHost ? "房主" : "玩家"}
@@ -232,6 +276,120 @@ function StepGuide({ room, isHost, isCurrentPresenter }: { room: Room; isHost: b
   return <p className="mt-4 rounded-md border border-rose-100 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">{text}</p>;
 }
 
+function getLobbyActionText(room: Room, isHost: boolean, isCurrentPresenter: boolean) {
+  if (room.status === "LOBBY") {
+    return isHost ? "选择本局出题人" : "等待房主选择出题人";
+  }
+
+  if (room.status === "QUESTION_SETUP") {
+    if (isCurrentPresenter && !room.preparedQuestionSetId) {
+      return "准备题库";
+    }
+
+    if (room.preparedQuestionSetId) {
+      return isHost ? "题库已准备，可以开始" : "题库已准备，等待房主开始";
+    }
+
+    return "等待出题人准备题库";
+  }
+
+  return statusText[room.status];
+}
+
+function PresenterPicker({
+  room,
+  pendingPresenterId,
+  onSelectPresenter,
+}: {
+  room: Room;
+  pendingPresenterId: string;
+  onSelectPresenter: (presenterPlayerId: string) => void;
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {room.players.map((player) => (
+        <button
+          className="flex min-h-14 w-full items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-left transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={Boolean(pendingPresenterId)}
+          key={player.id}
+          type="button"
+          onClick={() => onSelectPresenter(player.id)}
+        >
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold text-slate-950">{player.nickname}</span>
+            <span className="mt-0.5 block text-xs text-[var(--muted)]">{player.isHost ? "房主也可以出题" : "玩家"}</span>
+          </span>
+          <span className="shrink-0 text-sm font-semibold text-[var(--primary)]">
+            {pendingPresenterId === player.id ? "选择中..." : "选择"}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function PresenterPickerModal({
+  room,
+  isOpen,
+  pendingPresenterId,
+  onSelectPresenter,
+  onClose,
+}: {
+  room: Room;
+  isOpen: boolean;
+  pendingPresenterId: string;
+  onSelectPresenter: (presenterPlayerId: string) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 px-4 py-6" role="presentation" onMouseDown={onClose}>
+      <div
+        aria-modal="true"
+        className="max-h-[calc(100dvh-48px)] w-full max-w-xl overflow-y-auto rounded-lg border border-[var(--line)] bg-white p-5 shadow-2xl"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-950">选择出题人</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">选中后由这名玩家准备题库，房主稍后开始游戏。</p>
+          </div>
+          <button
+            aria-label="关闭选择出题人弹窗"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--line)] text-xl leading-none text-slate-500 transition hover:bg-slate-50"
+            type="button"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <div className="mt-5">
+          <PresenterPicker room={room} pendingPresenterId={pendingPresenterId} onSelectPresenter={onSelectPresenter} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GameSettingsPanel({
   settings,
   canEdit,
@@ -243,6 +401,7 @@ function GameSettingsPanel({
 }) {
   const isRoundRevealMode = settings.gameMode === "ROUND_REVEAL";
   const isTeamBattleMode = settings.gameMode === "TEAM_BATTLE";
+  const copy = gameModeCopy[settings.gameMode];
 
   function updateRounds(nextRounds: number) {
     onChange({
@@ -263,83 +422,184 @@ function GameSettingsPanel({
   }
 
   return (
-    <Panel title="本局游戏设置">
-      <p className="text-sm leading-6 text-[var(--muted)]">
-        这里设置每张图片的揭露轮数、每轮倒计时和每轮答对分数。设置会在房主点击“开始游戏”时写入本局游戏。
-      </p>
-      <label className="mt-4 block">
-        <span className="mb-2 block text-sm font-medium text-slate-900">游戏模式</span>
-        <select
-          className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-          disabled={!canEdit}
-          value={settings.gameMode}
-          onChange={(event) => onChange({ ...settings, gameMode: event.target.value as GameMode })}
-        >
-          {Object.entries(gameModeText).map(([mode, text]) => (
-            <option key={mode} value={mode}>
-              {text}
-            </option>
-          ))}
-        </select>
-      </label>
-      {!isTeamBattleMode ? (
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-slate-900">揭露轮数</span>
-          <input
-            className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-            disabled={!canEdit}
-            min={1}
-            max={10}
-            type="number"
-            value={settings.maxRevealRounds}
-            onChange={(event) => updateRounds(Math.max(1, Math.min(10, Number(event.target.value) || 1)))}
-          />
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-slate-900">每轮倒计时（秒）</span>
-          <input
-            className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-            disabled={!canEdit}
-            min={1}
-            max={600}
-            type="number"
-            value={settings.roundSeconds}
-            onChange={(event) =>
-              onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 60)) })
-            }
-          />
-        </label>
+    <div className="rounded-md border border-[var(--line)] bg-white">
+      <div className="border-b border-[var(--line)] bg-slate-50 px-4 py-3">
+        <p className="text-sm font-semibold text-slate-950">游戏说明</p>
+        <p className="mt-1 text-sm leading-6 text-slate-700">{gameModeCommonRule}</p>
       </div>
-      ) : null}
-      {isRoundRevealMode ? (
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        {Array.from({ length: settings.maxRevealRounds }, (_, index) => (
-          <label className="block" key={index}>
-            <span className="mb-2 block text-sm font-medium text-slate-900">第 {index + 1} 轮分数</span>
-            <input
+      <div className="grid gap-4 lg:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)]">
+        <div className="p-4">
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-900">游戏模式</span>
+            <select
               className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
               disabled={!canEdit}
-              min={0}
-              type="number"
-              value={settings.roundScores[index] ?? 0}
-              onChange={(event) => updateScore(index, Math.max(0, Number(event.target.value) || 0))}
-            />
+              value={settings.gameMode}
+              onChange={(event) => onChange({ ...settings, gameMode: event.target.value as GameMode })}
+            >
+              {(Object.keys(gameModeCopy) as GameMode[]).map((mode) => (
+                <option key={mode} value={mode}>
+                  {gameModeCopy[mode].title}
+                </option>
+              ))}
+            </select>
           </label>
-        ))}
+          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.summary}</p>
+          {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前只能查看，不能修改。</p> : null}
+        </div>
+
+        <div className="border-t border-[var(--line)] p-4 lg:border-l lg:border-t-0">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-900">具体规则</p>
+            <span className="rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{copy.title}</span>
+          </div>
+          <ol className="mt-3 grid gap-2">
+            {copy.rules.map((rule, index) => (
+              <li className="flex gap-2 text-sm leading-6 text-slate-700" key={rule}>
+                <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded bg-slate-900 text-[11px] font-bold text-white">
+                  {index + 1}
+                </span>
+                <span>{rule}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
       </div>
-      ) : isTeamBattleMode ? (
-        <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-          除出题者外随机平均分成红蓝两队。每回合由当前队伍投票选择揭露方块，再投票决定是否猜测；猜中队伍 +1 分，猜错则对方下回合可揭露 2 个方块。
+
+      <details className="border-t border-[var(--line)] px-4 py-3">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-900">高级设置</summary>
+        {copy.settingsNote ? <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{copy.settingsNote}</p> : null}
+
+        {!isTeamBattleMode ? (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-900">最多轮数</span>
+              <input
+                className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                disabled={!canEdit}
+                min={1}
+                max={10}
+                type="number"
+                value={settings.maxRevealRounds}
+                onChange={(event) => updateRounds(Math.max(1, Math.min(10, Number(event.target.value) || 1)))}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-900">每轮秒数</span>
+              <input
+                className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                disabled={!canEdit}
+                min={1}
+                max={600}
+                type="number"
+                value={settings.roundSeconds}
+                onChange={(event) =>
+                  onChange({ ...settings, roundSeconds: Math.max(1, Math.min(600, Number(event.target.value) || 60)) })
+                }
+              />
+            </label>
+          </div>
+        ) : null}
+
+        {isRoundRevealMode ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            {Array.from({ length: settings.maxRevealRounds }, (_, index) => (
+              <label className="block" key={index}>
+                <span className="mb-2 block text-sm font-medium text-slate-900">第 {index + 1} 轮分数</span>
+                <input
+                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition disabled:bg-slate-100 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  disabled={!canEdit}
+                  min={0}
+                  type="number"
+                  value={settings.roundScores[index] ?? 0}
+                  onChange={(event) => updateScore(index, Math.max(0, Number(event.target.value) || 0))}
+                />
+              </label>
+            ))}
+          </div>
+        ) : isTeamBattleMode ? (
+          <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+            固定规则：自动分队，猜对队伍得 1 分。
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-[var(--line)] bg-slate-50 px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+            {settings.gameMode === "BUZZER_FIRST_CORRECT" ? "固定得分：首个答对 +1。" : "固定得分：按答对名次递减，最低 1 分。"}
+          </div>
+        )}
+      </details>
+    </div>
+  );
+}
+
+function LobbyMainPanel({
+  room,
+  settings,
+  isHost,
+  presenterName,
+  isStartingGame,
+  isCancelingRound,
+  onSettingsChange,
+  onOpenPresenterPicker,
+  onStartGame,
+  onCancelRound,
+}: {
+  room: Room;
+  settings: GameSettings;
+  isHost: boolean;
+  presenterName: string;
+  isStartingGame: boolean;
+  isCancelingRound: boolean;
+  onSettingsChange: (settings: GameSettings) => void;
+  onOpenPresenterPicker: () => void;
+  onStartGame: () => void;
+  onCancelRound: () => void;
+}) {
+  const actionText = getLobbyActionText(room, isHost, false);
+  const hasQuestionSet = Boolean(room.preparedQuestionSetId);
+  const canEditSettings = isHost && (room.status === "LOBBY" || room.status === "QUESTION_SETUP");
+
+  return (
+    <Panel className="h-full" title="房间大厅">
+      <div className="rounded-md border border-rose-100 bg-rose-50 px-5 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase text-rose-500">当前步骤</p>
+            <p className="mt-1 text-2xl font-bold text-rose-950">{actionText}</p>
+            <p className="mt-2 text-sm leading-6 text-rose-800">
+              {room.status === "LOBBY"
+                ? isHost
+                  ? "先确认玩法，再选择一名出题人。"
+                  : "房主会选择玩法和出题人。"
+                : hasQuestionSet
+                  ? isHost
+                    ? "可以继续调整玩法，确认后开始游戏。"
+                    : "等待房主开始游戏。"
+                  : `当前出题人是 ${presenterName}。`}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-3">
+            {isHost && room.status === "LOBBY" ? (
+              <Button type="button" onClick={onOpenPresenterPicker}>
+                选择出题人
+              </Button>
+            ) : null}
+            {isHost && room.status === "QUESTION_SETUP" ? (
+              <>
+                <Button type="button" onClick={onStartGame} disabled={isStartingGame || !hasQuestionSet}>
+                  {isStartingGame ? "启动中..." : "开始游戏"}
+                </Button>
+                <Button type="button" variant="secondary" onClick={onCancelRound} disabled={isCancelingRound}>
+                  {isCancelingRound ? "取消中..." : "取消本局"}
+                </Button>
+              </>
+            ) : null}
+          </div>
         </div>
-      ) : (
-        <div className="mt-3 rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm leading-6 text-[var(--muted)]">
-          {settings.gameMode === "BUZZER_FIRST_CORRECT"
-            ? "首答制：每轮每人 1 次抢答机会，第一个答对者 +1 分并结束本题。"
-            : "排名得分制：每轮每人 1 次抢答机会，按本题答对顺序计分：第 1 名 +N，第 2 名 +N-1，依次递减，最低 +1。"}
-        </div>
-      )}
-      {!canEdit ? <p className="mt-3 text-sm text-[var(--muted)]">当前阶段你只能查看设置，不能修改。</p> : null}
+      </div>
+
+      <div className="mt-5">
+        <GameSettingsPanel settings={settings} canEdit={canEditSettings} onChange={onSettingsChange} />
+      </div>
     </Panel>
   );
 }
@@ -658,6 +918,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const [isReturningToLobby, setIsReturningToLobby] = useState(false);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [isLeavingRoom, setIsLeavingRoom] = useState(false);
+  const [isPresenterPickerOpen, setIsPresenterPickerOpen] = useState(false);
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     gameMode: "ROUND_REVEAL",
     maxRevealRounds: 3,
@@ -814,7 +1075,9 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
   const isHost = Boolean(currentPlayer?.isHost);
   const presenterName = room ? getPresenterName(room.players, room.currentPresenterPlayerId) : "未选择";
   const isCurrentPresenter = room?.currentPresenterPlayerId === playerId;
-  const shouldShowLobby = room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && !isCurrentPresenter);
+  const shouldShowQuestionSetup = room?.status === "QUESTION_SETUP" && isCurrentPresenter && !room.preparedQuestionSetId;
+  const shouldShowLobby =
+    room?.status === "LOBBY" || (room?.status === "QUESTION_SETUP" && (!isCurrentPresenter || Boolean(room.preparedQuestionSetId)));
 
   async function handleBackHome() {
     try {
@@ -885,6 +1148,7 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
     try {
       const nextRoom = await selectPresenterForRound(room.id, playerId, presenterPlayerId);
       setRoom((currentRoom) => (currentRoom ? { ...currentRoom, ...nextRoom, players: currentRoom.players } : currentRoom));
+      setIsPresenterPickerOpen(false);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "选择出题人失败，请稍后重试。");
     } finally {
@@ -1026,125 +1290,76 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
             </div>
           ) : null}
         </main>
-      ) : (
-        <div className={shouldShowLobby ? "grid gap-5 lg:grid-cols-[0.9fr_1.1fr]" : "grid gap-5"}>
-          {shouldShowLobby ? (
+      ) : shouldShowLobby ? (
+        <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <aside className="h-full">
             <PlayerList
               players={room.players}
               playerId={playerId}
               presenterPlayerId={room.currentPresenterPlayerId}
               gameMode={gameSettings.gameMode}
             />
-          ) : null}
-
-          <div className="space-y-5">
-            {shouldShowLobby ? (
-              <GameSettingsPanel
-                settings={gameSettings}
-                canEdit={isHost}
-                onChange={setGameSettings}
-              />
-            ) : null}
-
-            {room.status !== "GAME_RESULT" ? (
-            <Panel title="当前游戏状态">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-                  <p className="text-sm text-[var(--muted)]">状态</p>
-                  <p className="mt-2 text-xl font-semibold">{statusText[room.status]}</p>
-                </div>
-                <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-                  <p className="text-sm text-[var(--muted)]">本局出题人</p>
-                  <p className="mt-2 text-xl font-semibold">{presenterName}</p>
-                </div>
-              </div>
-              <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
-
-              {room.status === "QUESTION_SETUP" ? (
-                <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6">
-                  {isCurrentPresenter ? (
-                    <QuestionSetUploader
-                      room={room}
-                      presenterPlayerId={playerId}
-                      onRoomUpdated={(nextRoom) =>
-                        setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
-                      }
-                      onError={setError}
-                      onClearError={() => setError("")}
-                    />
-                  ) : (
-                    <p className="font-semibold text-slate-900">
-                      {room.preparedQuestionSetId ? "出题人已准备好题库，房主可以开始游戏。" : "等待出题人准备题库。"}
-                    </p>
-                  )}
-                  {isHost ? (
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      <Button
-                        type="button"
-                        onClick={handleStartGame}
-                        disabled={isStartingGame || !room.preparedQuestionSetId}
-                      >
-                        {isStartingGame ? "启动中..." : "开始游戏"}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={handleCancelRound}
-                        disabled={isCancelingRound}
-                      >
-                        {isCancelingRound ? "取消中..." : "取消本局"}
-                      </Button>
-                      {!room.preparedQuestionSetId ? (
-                        <p className="basis-full text-sm text-[var(--muted)]">出题人准备好题库后才能开始。</p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-
-            </Panel>
-            ) : null}
-
-            {room.status === "GAME_RESULT" ? (
-              <GameResultPanel
-                room={room}
-                currentGameId={room.currentGameId}
-                playerId={playerId}
-                isHost={isHost}
-                isCurrentPresenter={isCurrentPresenter}
-                isReturningToLobby={isReturningToLobby}
-                onReturnToLobby={handleReturnToLobby}
-                onError={setError}
-              />
-            ) : null}
-
-            {isHost && room.status === "LOBBY" ? (
-              <Panel title="选择出题人">
-                <div className="space-y-3">
-                  {room.players.map((player) => (
-                    <button
-                      className="flex w-full items-center justify-between rounded-md border border-[var(--line)] bg-white px-4 py-3 text-left transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={Boolean(pendingPresenterId)}
-                      key={player.id}
-                      type="button"
-                      onClick={() => handleSelectPresenter(player.id)}
-                    >
-                      <span>
-                        <span className="block font-semibold text-slate-950">{player.nickname}</span>
-                        <span className="mt-1 block text-xs text-[var(--muted)]">
-                          {player.isHost ? "房主也可以作为出题人" : "玩家"}
-                        </span>
-                      </span>
-                      <span className="text-sm font-semibold text-[var(--primary)]">
-                        {pendingPresenterId === player.id ? "选择中..." : "选择"}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </Panel>
-            ) : null}
-          </div>
+          </aside>
+          <LobbyMainPanel
+            room={room}
+            settings={gameSettings}
+            isHost={isHost}
+            presenterName={presenterName}
+            isStartingGame={isStartingGame}
+            isCancelingRound={isCancelingRound}
+            onSettingsChange={setGameSettings}
+            onOpenPresenterPicker={() => setIsPresenterPickerOpen(true)}
+            onStartGame={handleStartGame}
+            onCancelRound={handleCancelRound}
+          />
+          <PresenterPickerModal
+            room={room}
+            isOpen={isPresenterPickerOpen}
+            pendingPresenterId={pendingPresenterId}
+            onSelectPresenter={handleSelectPresenter}
+            onClose={() => setIsPresenterPickerOpen(false)}
+          />
         </div>
+      ) : shouldShowQuestionSetup ? (
+        <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <aside className="h-full">
+            <PlayerList
+              players={room.players}
+              playerId={playerId}
+              presenterPlayerId={room.currentPresenterPlayerId}
+              gameMode={gameSettings.gameMode}
+            />
+          </aside>
+          <Panel title="准备题库">
+            <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
+            <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6">
+              <QuestionSetUploader
+                room={room}
+                presenterPlayerId={playerId}
+                onRoomUpdated={(nextRoom) =>
+                  setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
+                }
+                onError={setError}
+                onClearError={() => setError("")}
+              />
+            </div>
+          </Panel>
+        </div>
+      ) : room.status === "GAME_RESULT" ? (
+        <GameResultPanel
+          room={room}
+          currentGameId={room.currentGameId}
+          playerId={playerId}
+          isHost={isHost}
+          isCurrentPresenter={isCurrentPresenter}
+          isReturningToLobby={isReturningToLobby}
+          onReturnToLobby={handleReturnToLobby}
+          onError={setError}
+        />
+      ) : (
+        <Panel title="当前游戏状态">
+          <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
+        </Panel>
       )}
     </AppShell>
   );
