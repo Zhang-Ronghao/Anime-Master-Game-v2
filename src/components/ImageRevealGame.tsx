@@ -920,7 +920,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const pendingBuzzerAnswers = buzzerAnswers.filter((answer) => answer.status === "pending");
   const currentBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
-  const hasUnsubmittedGuessers = activeGuessers.some((player) => !currentRoundAnswerPlayerSet.has(player.id));
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
     activeGuessers.length > 0 && activeGuessers.every((player) => buzzerAnswerPlayerSet.has(player.id));
@@ -1019,12 +1018,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  const areAllGuessersCorrect = guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id));
   const canConfirmReveal =
     isPresenter &&
     !isTeamBattleMode &&
     selectedBlocks.length > 0 &&
     !isConfirmingReveal &&
     !isQuestionReviewing &&
+    !areAllGuessersCorrect &&
     Boolean(gameSession) &&
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
@@ -1036,8 +1037,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isCurrentPlayerCorrect &&
     isRoundActive &&
     answerText.trim().length > 0 &&
-    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending") &&
-    (!myHasForfeited || hasUnsubmittedGuessers);
+    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canForfeitAnswer =
     !isPresenter &&
     !isBuzzerMode &&
@@ -1046,7 +1046,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isCurrentPlayerCorrect &&
     isRoundActive &&
     !myHasForfeited &&
-    (!myAnswer || hasUnsubmittedGuessers) &&
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canCancelForfeit =
     !isPresenter &&
@@ -1055,8 +1054,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
-    myHasForfeited &&
-    hasUnsubmittedGuessers;
+    myHasForfeited;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
     isBuzzerMode &&
@@ -1132,10 +1130,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     isBuzzerMode &&
     (currentRound >= maxRevealRounds ||
       (gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0) ||
-      (guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id))));
+      areAllGuessersCorrect);
   const buzzerSettleActionText = isBuzzerSettleToReview ? "公布答案" : "进入下一轮";
-  const standardSettleActionText = isBuzzerMode ? buzzerSettleActionText : currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
-  const standardAdvanceActionText = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+  const standardSettleActionText = isBuzzerMode
+    ? buzzerSettleActionText
+    : areAllGuessersCorrect || currentRound >= maxRevealRounds
+      ? "公布答案"
+      : "进入下一轮";
+  const standardAdvanceActionText = areAllGuessersCorrect || currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人揭露图片";
@@ -1214,7 +1216,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     } else if (myHasForfeited) {
       standardTaskTone = "border-slate-200 bg-white";
       standardTaskTitle = "已放弃";
-      standardTaskDetail = hasUnsubmittedGuessers ? "可提交答案或取消放弃" : "等待结算";
+      standardTaskDetail = "截止前可提交答案或取消放弃";
     } else if (myAnswer) {
       standardTaskTone = "border-emerald-200 bg-white";
       standardTaskTitle = "已提交答案";
@@ -2581,8 +2583,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     disabled={
                       !isRoundActive ||
                       (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
-                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") ||
-                      (myHasForfeited && !hasUnsubmittedGuessers)
+                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
                     }
                     maxLength={80}
                     placeholder="输入动画名称"

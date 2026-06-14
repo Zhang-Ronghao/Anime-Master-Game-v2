@@ -341,6 +341,36 @@ function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "a
   return "answer_text" in answer ? answer.answer_text === FORFEIT_ANSWER_TEXT : answer.answerText === FORFEIT_ANSWER_TEXT;
 }
 
+async function areAllGuessersCorrectForQuestion(params: {
+  roomId: string;
+  gameSessionId: string;
+  questionIndex: number;
+  presenterPlayerId: string;
+}) {
+  const [{ data: players, error: playersError }, { data: questionResults, error: questionResultsError }] = await Promise.all([
+    d1.from("players").select("id").eq("room_id", params.roomId).returns<Pick<DbPlayer, "id">[]>(),
+    d1
+      .from("question_results")
+      .select("player_id")
+      .eq("game_session_id", params.gameSessionId)
+      .eq("question_index", params.questionIndex)
+      .returns<Pick<DbQuestionResult, "player_id">[]>(),
+  ]);
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  if (questionResultsError) {
+    throw new Error(questionResultsError.message);
+  }
+
+  const guesserIds = (players ?? []).filter((player) => player.id !== params.presenterPlayerId).map((player) => player.id);
+  const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
+
+  return guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+}
+
 function updateTeamBattleState(gameSessionId: string, state: TeamBattleState, extra?: Record<string, unknown>) {
   return d1
     .from("game_sessions")
@@ -1269,6 +1299,17 @@ export async function confirmRevealBlocks(params: {
     throw new Error("揭露方块失败：当前游戏不存在，或你不是出题人。");
   }
 
+  const allGuessersCorrect = await areAllGuessersCorrectForQuestion({
+    roomId: currentGameSession.room_id,
+    gameSessionId: currentGameSession.id,
+    questionIndex: currentGameSession.current_question_index,
+    presenterPlayerId: currentGameSession.presenter_player_id,
+  });
+
+  if (allGuessersCorrect) {
+    return revealQuestionForReview(currentGameSession.id);
+  }
+
   const revealedBlocks = toGameSession(currentGameSession).revealedBlocks;
   const selectedBlocks = params.selectedBlocks.filter(
     (block) => Number.isInteger(block) && block >= 0 && block < REVEAL_BLOCK_COUNT,
@@ -2058,7 +2099,9 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
     return currentSession;
   }
 
-  if (roundEnded || allEligiblePlayersUsedChance) {
+  const canSettleBecauseAllChancesUsed = currentSession.gameMode !== "BUZZER_RANKED" && allEligiblePlayersUsedChance;
+
+  if (roundEnded || canSettleBecauseAllChancesUsed) {
     if (currentRound >= currentSession.maxRevealRounds) {
       return revealQuestionForReview(currentGameSession.id);
     }
@@ -2146,37 +2189,6 @@ export async function submitAnswer(params: {
 
   if (buzzerLoadError) {
     throw new Error(buzzerLoadError.message);
-  }
-
-  if (existingAnswer && isForfeitAnswer(existingAnswer)) {
-    const { data: currentRoundAnswers, error: answersError } = await d1
-      .from("answers")
-      .select("*")
-      .eq("game_session_id", gameSession.id)
-      .eq("question_index", gameSession.currentQuestionIndex)
-      .eq("reveal_round", gameSession.currentRevealRound)
-      .returns<DbAnswer[]>();
-
-    if (answersError) {
-      throw new Error(answersError.message);
-    }
-
-    const { data: players, error: playersError } = await d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .returns<DbPlayer[]>();
-
-    if (playersError) {
-      throw new Error(playersError.message);
-    }
-
-    const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
-    const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
-
-    if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-      throw new Error("所有答题者都已提交，本轮不能再修改答案。");
-    }
   }
 
   await writePendingRoundRevealBuzzerAnswer({
@@ -2278,37 +2290,6 @@ export async function submitForfeitAnswer(params: {
     throw new Error(answerLoadError.message);
   }
 
-  if (existingAnswer && !isForfeitAnswer(existingAnswer)) {
-    const { data: currentRoundAnswers, error: answersError } = await d1
-      .from("answers")
-      .select("*")
-      .eq("game_session_id", gameSession.id)
-      .eq("question_index", gameSession.currentQuestionIndex)
-      .eq("reveal_round", gameSession.currentRevealRound)
-      .returns<DbAnswer[]>();
-
-    if (answersError) {
-      throw new Error(answersError.message);
-    }
-
-    const { data: players, error: playersError } = await d1
-      .from("players")
-      .select("*")
-      .eq("room_id", gameSession.roomId)
-      .returns<DbPlayer[]>();
-
-    if (playersError) {
-      throw new Error(playersError.message);
-    }
-
-    const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
-    const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
-
-    if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-      throw new Error("所有答题者都已提交，本轮不能再修改为放弃作答。");
-    }
-  }
-
   if (existingBuzzerAnswer) {
     const { data: deletedBuzzerAnswer, error: deleteBuzzerError } = await d1
       .from("buzzer_answers")
@@ -2370,35 +2351,6 @@ export async function cancelForfeitAnswer(params: {
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
     throw new Error("本轮答题时间已结束，不能再取消放弃。");
-  }
-
-  const { data: currentRoundAnswers, error: answersError } = await d1
-    .from("answers")
-    .select("*")
-    .eq("game_session_id", gameSession.id)
-    .eq("question_index", gameSession.currentQuestionIndex)
-    .eq("reveal_round", gameSession.currentRevealRound)
-    .returns<DbAnswer[]>();
-
-  if (answersError) {
-    throw new Error(answersError.message);
-  }
-
-  const { data: players, error: playersError } = await d1
-    .from("players")
-    .select("*")
-    .eq("room_id", gameSession.roomId)
-    .returns<DbPlayer[]>();
-
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
-  const eligibleGuesserCount = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).length;
-  const submittedPlayerCount = new Set((currentRoundAnswers ?? []).map((answer) => answer.player_id)).size;
-
-  if (eligibleGuesserCount > 0 && submittedPlayerCount >= eligibleGuesserCount) {
-    throw new Error("所有答题者都已提交，本轮不能再取消放弃。");
   }
 
   const { data: existingAnswer, error: answerLoadError } = await d1
@@ -3249,6 +3201,17 @@ export async function gradeAnswersAndAdvance(params: {
 
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
   const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+
+  if (allPlayersCorrect) {
+    const reviewedGameSession = await revealQuestionForReview(currentGameSession.id);
+
+    return {
+      gameSession: reviewedGameSession,
+      room: null,
+      newlyScoredPlayerIds,
+    };
+  }
+
   const { data: settledGameSession, error: settleError } = await d1
     .from("game_sessions")
     .update({
