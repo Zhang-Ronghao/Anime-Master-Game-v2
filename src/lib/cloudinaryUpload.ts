@@ -49,7 +49,7 @@ export type UploadProgress = {
 const cloudinaryConfig = {
   cloudName: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ?? "",
   uploadPreset: process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET ?? "",
-  folder: process.env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "",
+  folder: process.env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "anime-master-game",
   maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 960),
   quality: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
   format: process.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
@@ -94,7 +94,7 @@ export async function uploadImagesToCloudinary(
   onProgress: (progress: UploadProgress) => void,
 ) {
   if (!cloudinaryConfig.cloudName || !cloudinaryConfig.uploadPreset) {
-    throw new Error("缺少 Cloudinary Cloud Name 或 Unsigned Upload Preset 配置。");
+    throw new Error("缺少图片上传配置：请设置云名称和免签上传预设。");
   }
 
   const results: CloudinaryUploadItemResult[] = [];
@@ -295,11 +295,11 @@ async function uploadPreparedFile(prepared: PreparedImage) {
   };
 
   if (!response.ok) {
-    throw new Error(data.error?.message || `Cloudinary HTTP ${response.status}`);
+    throw new Error(`图片上传失败，请检查上传预设和网络。状态码 ${response.status}。`);
   }
 
   if (!data.secure_url) {
-    throw new Error("Cloudinary 未返回图片 URL。");
+    throw new Error("图片服务未返回图片地址。");
   }
 
   return {

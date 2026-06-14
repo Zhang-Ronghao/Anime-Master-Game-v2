@@ -1,10 +1,8 @@
 # 动漫高手·一眼顶针
 
-多人实时动画截图猜番小游戏。房主创建房间，选择本局出题人；出题人准备截图题库；房主开始游戏；玩家根据逐块揭露的图片猜动画名，最后进入排行榜结算。
+多人实时动画截图猜番小游戏。房主创建房间并选择本局出题人，出题人准备截图题库，房主开始游戏，玩家根据逐块揭露的图片猜动画名，最后进入排行榜结算。
 
-在线体验：
-
-https://anime-master-game-v2.vercel.app/
+部署后使用 Cloudflare Pages 地址访问前端。
 
 ## 怎么玩
 
@@ -53,11 +51,13 @@ https://anime-master-game-v2.vercel.app/
 
 ## 技术栈
 
-- Next.js 13.5
+- Vite static build for Cloudflare Pages
 - React 18
 - TypeScript
 - Tailwind CSS
-- Supabase Postgres + Realtime
+- Cloudflare Pages
+- Cloudflare Workers + Durable Objects
+- Cloudflare D1
 - Cloudinary unsigned browser upload
 
 ## 部署

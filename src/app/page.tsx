@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@/lib/router";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/Button";
 import { FormField } from "@/components/FormField";
 import { Panel } from "@/components/Panel";
 import { QuestionGuideButton } from "@/components/QuestionGuideButton";
 import { createNewLocalPlayerSession, getLocalSession, saveLocalSession } from "@/lib/localSession";
-import { createSupabaseRoom, getRoomByCode, joinSupabaseRoom } from "@/lib/supabaseRooms";
+import { createRoom, getRoomByCode, joinRoom } from "@/lib/cloudflareRooms";
 
 export default function HomePage() {
   const router = useRouter();
@@ -19,8 +19,10 @@ export default function HomePage() {
 
   useEffect(() => {
     const session = getLocalSession();
+    const roomCodeFromUrl = new URLSearchParams(window.location.search).get("roomCode") ?? "";
+
     setNickname(session.nickname);
-    setRoomCode(session.roomCode ?? "");
+    setRoomCode(/^\d{6}$/.test(roomCodeFromUrl) ? roomCodeFromUrl : (session.roomCode ?? ""));
   }, []);
 
   function validateNickname() {
@@ -46,7 +48,7 @@ export default function HomePage() {
 
     try {
       const session = getLocalSession();
-      const room = await createSupabaseRoom(session.playerId, trimmedNickname);
+      const room = await createRoom(session.playerId, trimmedNickname);
 
       saveLocalSession({
         playerId: session.playerId,
@@ -94,7 +96,7 @@ export default function HomePage() {
         session = createNewLocalPlayerSession(trimmedNickname);
       }
 
-      const result = await joinSupabaseRoom(trimmedRoomCode, session.playerId, trimmedNickname);
+      const result = await joinRoom(trimmedRoomCode, session.playerId, trimmedNickname);
 
       if (result.error || !result.room) {
         setError(result.error ?? "加入房间失败，请稍后重试。");

@@ -2,7 +2,6 @@
 
 import { DragEvent, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/Button";
-import { FormField } from "@/components/FormField";
 import {
   filesToUploadableImages,
   getCloudinaryUploadConfigStatus,
@@ -18,7 +17,7 @@ import {
   parseImageUrlsText,
   parseQuestionImportText,
   prepareQuestionSetForStart,
-} from "@/lib/supabaseRooms";
+} from "@/lib/cloudflareRooms";
 import type { QuestionSet, Room } from "@/types/game";
 
 type QuestionSetUploaderProps = {
@@ -31,6 +30,17 @@ type QuestionSetUploaderProps = {
 
 type SetupMode = "upload" | "urlText" | "community";
 type CommunitySort = "latest" | "rating";
+const maxUploadImageCount = 120;
+const maxUploadImageBytes = 20 * 1024 * 1024;
+
+type BrowserFileSystemFileHandle = {
+  kind: "file";
+  getFile: () => Promise<File>;
+};
+
+type BrowserFileSystemDirectoryHandle = {
+  values: () => AsyncIterable<BrowserFileSystemFileHandle | { kind: "directory" }>;
+};
 
 const emptyProgress: UploadProgress = {
   done: 0,
@@ -83,6 +93,53 @@ function getQuestionSetPreviewItems(questionSet: QuestionSet | null) {
   }));
 }
 
+function getDraftQuestionSetTitle(room: Room) {
+  return `房间 ${room.code} 临时题库`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${bytes} B`;
+}
+
+function isCurrentFolderFile(file: File) {
+  const relativePath = file.webkitRelativePath || "";
+
+  if (!relativePath) {
+    return true;
+  }
+
+  return relativePath.split(/[\\/]/).filter(Boolean).length <= 2;
+}
+
+async function pickCurrentFolderFiles() {
+  const picker = (window as Window & {
+    showDirectoryPicker?: () => Promise<BrowserFileSystemDirectoryHandle>;
+  }).showDirectoryPicker;
+
+  if (!picker) {
+    return null;
+  }
+
+  const directoryHandle = await picker();
+  const files: File[] = [];
+
+  for await (const entry of directoryHandle.values()) {
+    if (entry.kind === "file") {
+      files.push(await entry.getFile());
+    }
+  }
+
+  return files;
+}
+
 export function QuestionSetUploader({
   room,
   presenterPlayerId,
@@ -95,8 +152,6 @@ export function QuestionSetUploader({
   const jsonlInputRef = useRef<HTMLInputElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<SetupMode>("upload");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [urlText, setUrlText] = useState("");
   const [items, setItems] = useState<UploadableImage[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -108,7 +163,7 @@ export function QuestionSetUploader({
   const [communitySets, setCommunitySets] = useState<QuestionSet[]>([]);
   const [communitySearch, setCommunitySearch] = useState("");
   const [previewingCommunitySet, setPreviewingCommunitySet] = useState<QuestionSet | null>(null);
-  const [isNotifyingHost, setIsNotifyingHost] = useState(false);
+  const [isConfirmingQuestionSet, setIsConfirmingQuestionSet] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(emptyProgress);
   const [results, setResults] = useState<CloudinaryUploadItemResult[]>([]);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
@@ -171,7 +226,7 @@ export function QuestionSetUploader({
       return;
     }
 
-    setIsNotifyingHost(true);
+    setIsConfirmingQuestionSet(true);
     try {
       const nextRoom = await prepareQuestionSetForStart({
         roomId: room.id,
@@ -183,7 +238,7 @@ export function QuestionSetUploader({
     } catch (error) {
       onError(error instanceof Error ? error.message : "通知房主失败，请稍后重试。");
     } finally {
-      setIsNotifyingHost(false);
+      setIsConfirmingQuestionSet(false);
     }
   }
 
@@ -201,21 +256,71 @@ export function QuestionSetUploader({
       return;
     }
 
-    const incoming = filesToUploadableImages(fileList);
-    setItems((currentItems) => {
-      const existing = new Set(currentItems.map((item) => item.path));
-      const nextItems = [...currentItems];
+    const selectedFiles = Array.from(fileList);
+    const currentFolderFiles = selectedFiles.filter(isCurrentFolderFile);
+    const skippedNestedFiles = selectedFiles.length - currentFolderFiles.length;
+    const imageFiles = filesToUploadableImages(currentFolderFiles);
+    const oversizedFiles = imageFiles.filter((item) => item.size > maxUploadImageBytes);
+    const incoming = imageFiles.filter((item) => item.size <= maxUploadImageBytes);
+    const skippedNonImages = currentFolderFiles.length - imageFiles.length;
 
-      for (const item of incoming) {
-        if (!existing.has(item.path)) {
-          nextItems.push(item);
-          existing.add(item.path);
-        }
+    if (incoming.length === 0) {
+      onError(
+        oversizedFiles.length > 0
+          ? `图片不能超过 ${formatBytes(maxUploadImageBytes)}。`
+          : "没有检测到可上传的图片。",
+      );
+      return;
+    }
+
+    const existing = new Set(items.map((item) => item.path));
+    const nextItems = [...items];
+
+    for (const item of incoming) {
+      if (!existing.has(item.path)) {
+        nextItems.push(item);
+        existing.add(item.path);
+      }
+    }
+
+    const sortedItems = nextItems.sort((a, b) => a.path.localeCompare(b.path));
+    const limitedItems = sortedItems.slice(0, maxUploadImageCount);
+    const warningParts = [
+      sortedItems.length > maxUploadImageCount ? `一次最多选择 ${maxUploadImageCount} 张图片，已保留前 ${maxUploadImageCount} 张` : "",
+      skippedNestedFiles > 0 ? `已忽略 ${skippedNestedFiles} 个子文件夹内的文件` : "",
+      oversizedFiles.length > 0 ? `已跳过 ${oversizedFiles.length} 张超过 ${formatBytes(maxUploadImageBytes)} 的图片` : "",
+      skippedNonImages > 0 ? `已忽略 ${skippedNonImages} 个非图片文件` : "",
+    ].filter(Boolean);
+
+    setItems(limitedItems);
+
+    if (warningParts.length > 0) {
+      onError(`${warningParts.join("，")}。`);
+    } else {
+      clearError();
+    }
+
+    resetCreatedSet();
+  }
+
+  async function handleChooseFolder() {
+    try {
+      const pickedFiles = await pickCurrentFolderFiles();
+
+      if (pickedFiles) {
+        addFiles(pickedFiles);
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
       }
 
-      return nextItems.sort((a, b) => a.path.localeCompare(b.path));
-    });
-    resetCreatedSet();
+      onError(error instanceof Error ? error.message : "读取文件夹失败，请重试。");
+      return;
+    }
+
+    folderInputRef.current?.click();
   }
 
   function clearFiles() {
@@ -267,13 +372,6 @@ export function QuestionSetUploader({
   }
 
   async function createQuestionSetFromUrls(imageUrls: string[]) {
-    const trimmedTitle = title.trim();
-
-    if (!trimmedTitle) {
-      onError("请先输入题库标题。");
-      return null;
-    }
-
     if (imageUrls.length === 0) {
       onError("至少需要一张图片。");
       return null;
@@ -282,25 +380,19 @@ export function QuestionSetUploader({
     const createdQuestionSet = await createUploadedQuestionSet({
       roomId: room.id ?? "",
       presenterPlayerId,
-      title: trimmedTitle,
-      description,
+      title: getDraftQuestionSetTitle(room),
+      description: "",
       imageUrls,
     });
 
     setQuestionSet(createdQuestionSet);
     clearError();
     scrollToPreview();
-    await markQuestionSetReady(createdQuestionSet);
     return createdQuestionSet;
   }
 
   async function handleUpload() {
     clearError();
-
-    if (!title.trim()) {
-      onError("请先输入题库标题。");
-      return;
-    }
 
     if (items.length === 0) {
       onError("请先选择至少一张图片。");
@@ -334,6 +426,22 @@ export function QuestionSetUploader({
 
   async function handleCreateFromUrlText() {
     clearError();
+
+    if (!urlText.trim()) {
+      onError("请先粘贴图片 URL，或上传 JSONL 文件。");
+      return;
+    }
+
+    if (importPreview.error) {
+      onError(importPreview.error);
+      return;
+    }
+
+    if (importPreview.items.length === 0) {
+      onError("没有检测到有效图片 URL。请使用 http/https 图片链接，或每行一个包含 image_url 的 JSON 对象。");
+      return;
+    }
+
     setIsCreatingFromText(true);
     resetCreatedSet();
 
@@ -341,14 +449,13 @@ export function QuestionSetUploader({
       const createdQuestionSet = await createQuestionSetFromUrlText({
         roomId: room.id ?? "",
         presenterPlayerId,
-        title,
-        description,
+        title: getDraftQuestionSetTitle(room),
+        description: "",
         imageUrlsText: urlText,
       });
       setQuestionSet(createdQuestionSet);
       clearError();
       scrollToPreview();
-      await markQuestionSetReady(createdQuestionSet);
     } catch (error) {
       onError(error instanceof Error ? error.message : "从 URL 文本创建题库失败。");
     } finally {
@@ -372,11 +479,17 @@ export function QuestionSetUploader({
 
   async function handleSelectCommunitySet(selectedQuestionSet: QuestionSet) {
     setQuestionSet(selectedQuestionSet);
-    setTitle(selectedQuestionSet.title);
-    setDescription(selectedQuestionSet.description ?? "");
     clearError();
     scrollToPreview();
-    await markQuestionSetReady(selectedQuestionSet);
+  }
+
+  async function handleConfirmQuestionSet() {
+    if (!questionSet) {
+      onError("请先创建或选择题库。");
+      return;
+    }
+
+    await markQuestionSetReady(questionSet);
   }
 
   async function handleCopyUrlsText() {
@@ -389,232 +502,225 @@ export function QuestionSetUploader({
   }
 
   return (
-    <div className="mt-5 space-y-4 rounded-md border border-[var(--line)] bg-white p-4">
-      <div>
-        <p className="font-semibold text-slate-900">你是本局出题人，请准备题库。</p>
-        <p className="mt-1 text-sm text-[var(--muted)]">
-          选择一种题库来源，创建或选中题库后会通知房主，由房主开始游戏。
-        </p>
-      </div>
-
-      <div className="grid gap-2 sm:grid-cols-3">
-        {[
-          ["upload", "上传图片"],
-          ["urlText", "URL / JSONL 导入"],
-          ["community", "选择社区题库"],
-        ].map(([value, label]) => (
-          <button
-            className={[
-              "rounded-md border px-4 py-3 text-sm font-semibold transition",
-              mode === value ? "border-rose-300 bg-rose-50 text-rose-700" : "border-[var(--line)] bg-white hover:bg-slate-50",
-            ].join(" ")}
-            key={value}
-            type="button"
-            onClick={() => switchMode(value as SetupMode)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <FormField
-          label="题库标题"
-          maxLength={40}
-          placeholder="例如：经典动画截图"
-          value={title}
-          onChange={(event) => {
-            setTitle(event.target.value);
-            clearError();
-          }}
-        />
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-slate-900">简介</span>
-          <input
-            className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-            maxLength={120}
-            placeholder="可选"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-          />
-        </label>
-      </div>
-
-      {mode === "upload" ? (
-        <div className="space-y-4">
-          {!configStatus.isReady ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              缺少 Cloudinary 上传环境变量，无法上传新图片。
-            </div>
-          ) : null}
-          <div
-            className={`rounded-md border-2 border-dashed p-5 text-center transition ${
-              isDragging ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-slate-50"
-            }`}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-          >
-            <p className="text-sm font-semibold text-slate-900">拖拽图片到这里</p>
-            <p className="mt-1 text-sm text-[var(--muted)]">也可以批量选择图片或选择整个文件夹。</p>
-            <div className="mt-4 flex flex-wrap justify-center gap-3">
-              <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
-                选择图片
-              </Button>
-              <Button type="button" variant="secondary" onClick={() => folderInputRef.current?.click()}>
-                选择文件夹
-              </Button>
-              <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || items.length === 0}>
-                清空
-              </Button>
-            </div>
-            <input ref={fileInputRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addFiles(event.target.files)} />
-            <input
-              ref={folderInputRef}
-              className="hidden"
-              type="file"
-              accept="image/*"
-              multiple
-              {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-              onChange={(event) => addFiles(event.target.files)}
-            />
-          </div>
-          <div className="grid gap-3 text-sm sm:grid-cols-3">
-            <div className="rounded-md bg-slate-50 p-3">已选择：{items.length}</div>
-            <div className="rounded-md bg-slate-50 p-3">成功：{progress.success}</div>
-            <div className="rounded-md bg-slate-50 p-3">失败：{progress.fail}</div>
-          </div>
-          {progress.fail > 0 ? (
-            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              有图片上传失败。保留当前选择后可以再次点击“上传并创建题库”重试。
-            </p>
-          ) : null}
-          <div>
-            <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full bg-[var(--primary)] transition-all" style={{ width: `${progressPercent}%` }} />
-            </div>
-            <p className="mt-2 text-xs text-[var(--muted)]">{progress.latestMessage}</p>
-          </div>
-          <Button type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
-            {isUploading ? "上传中..." : "上传并创建题库"}
-          </Button>
+    <div className="space-y-6">
+      <section className="space-y-4">
+        <div className="flex items-center gap-3">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">1</span>
+          <h3 className="text-base font-semibold text-slate-950">选择来源</h3>
         </div>
-      ) : null}
 
-      {mode === "urlText" ? (
-        <div className="space-y-3 rounded-md border border-[var(--line)] bg-slate-50 p-4">
-          <div
-            className={`rounded-md border-2 border-dashed p-4 transition ${
-              isDraggingImport ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-white"
-            }`}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setIsDraggingImport(true);
-            }}
-            onDragLeave={() => setIsDraggingImport(false)}
-            onDrop={handleImportDrop}
-          >
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-              <div>
-                <p className="text-sm font-semibold text-slate-900">粘贴 URL 文本，或上传 JSONL 文件</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">
-                  JSONL 每行一个对象：{"{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"}
-                </p>
+        <div className="grid gap-2 sm:grid-cols-3" role="tablist" aria-label="题库来源">
+          {[
+            ["upload", "上传图片"],
+            ["urlText", "导入链接"],
+            ["community", "社区题库"],
+          ].map(([value, label]) => (
+            <button
+              aria-pressed={mode === value}
+              className={[
+                "rounded-md border px-4 py-3 text-left text-sm font-semibold transition",
+                mode === value
+                  ? "border-rose-300 bg-rose-50 text-rose-800 shadow-sm"
+                  : "border-[var(--line)] bg-white text-slate-700 hover:bg-slate-50",
+              ].join(" ")}
+              key={value}
+              type="button"
+              onClick={() => switchMode(value as SetupMode)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "upload" ? (
+          <div className="space-y-4">
+            {!configStatus.isReady ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                缺少图片上传环境变量，无法上传新图片。
               </div>
-              <Button type="button" variant="secondary" onClick={() => jsonlInputRef.current?.click()}>
-                选择 JSONL
-              </Button>
-            </div>
-            <input
-              ref={jsonlInputRef}
-              className="hidden"
-              type="file"
-              accept=".jsonl,application/json"
-              multiple
-              onChange={(event) => readJsonlFiles(event.target.files)}
-            />
-          </div>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">图片 URL / JSONL 文本</span>
-            <textarea
-              className="min-h-44 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              placeholder={
-                "每行一个 http/https 图片 URL\nhttps://res.cloudinary.com/.../image.webp\n\n或每行一个 JSON 对象\n{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"
-              }
-              value={urlText}
-              onChange={(event) => {
-                setUrlText(event.target.value);
-                resetCreatedSet();
-                clearError();
+            ) : null}
+            <div
+              className={`rounded-md border-2 border-dashed p-6 text-center transition ${
+                isDragging ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-slate-50"
+              }`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsDragging(true);
               }}
-            />
-          </label>
-          {importPreview.error ? (
-            <p className="text-sm text-red-600">{importPreview.error}</p>
-          ) : (
-            <p className="text-sm text-[var(--muted)]">
-              检测到 {importPreview.items.length} 个有效 URL，其中 {importPreview.labeledCount} 个带标签。
-            </p>
-          )}
-          <Button type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
-            {isCreatingFromText ? "创建中..." : "用 URL / JSONL 创建题库"}
-          </Button>
-        </div>
-      ) : null}
-
-      {mode === "community" ? (
-        <div className="space-y-3 rounded-md border border-[var(--line)] bg-slate-50 p-4">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div>
-              <p className="font-semibold text-slate-900">社区题库</p>
-              <p className="mt-1 text-sm text-[var(--muted)]">选择后直接使用原题库开始游戏，不复制图片或 questions。</p>
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+            >
+              <p className="text-base font-semibold text-slate-900">拖拽图片到这里</p>
+              <div className="mt-4 flex flex-wrap justify-center gap-3">
+                <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
+                  选择图片
+                </Button>
+                <Button type="button" variant="secondary" onClick={handleChooseFolder}>
+                  选择文件夹
+                </Button>
+                <Button type="button" variant="secondary" onClick={clearFiles} disabled={isUploading || items.length === 0}>
+                  清空
+                </Button>
+              </div>
+              <p className="mt-3 text-xs text-[var(--muted)]">
+                文件夹只取当前层图片，不读取子文件夹；单张不超过 {formatBytes(maxUploadImageBytes)}，最多 {maxUploadImageCount} 张。
+              </p>
+              <input ref={fileInputRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addFiles(event.target.files)} />
+              <input
+                ref={folderInputRef}
+                className="hidden"
+                type="file"
+                accept="image/*"
+                multiple
+                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                onChange={(event) => addFiles(event.target.files)}
+              />
             </div>
-            <div className="flex flex-wrap gap-2">
-              <select
-                className="h-12 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
-                value={communitySort}
-                onChange={(event) => {
-                  const nextSort = event.target.value as CommunitySort;
-                  setCommunitySort(nextSort);
-                  handleLoadCommunitySets(nextSort);
-                }}
+            <div className="grid gap-3 text-sm sm:grid-cols-3">
+              <div
+                className={
+                  items.length > 0
+                    ? "rounded-md border-2 border-emerald-500 bg-white p-3 shadow-sm"
+                    : "rounded-md bg-slate-50 p-3"
+                }
               >
-                <option value="latest">最新</option>
-                <option value="rating">评分最高</option>
-              </select>
-              <Button type="button" variant="secondary" onClick={() => handleLoadCommunitySets()} disabled={isLoadingCommunity}>
-                {isLoadingCommunity ? "加载中..." : "刷新列表"}
-              </Button>
+                <span
+                  className={items.length > 0 ? "flex items-center gap-1.5 text-xs font-semibold text-slate-600" : "block text-xs text-[var(--muted)]"}
+                >
+                  {items.length > 0 ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> : null}
+                  <span>已选择</span>
+                </span>
+                <span className={items.length > 0 ? "mt-1 block text-2xl font-bold text-emerald-800" : "mt-1 block text-xl font-semibold text-slate-950"}>
+                  {items.length}
+                </span>
+              </div>
+              <div className="rounded-md bg-slate-50 p-3">
+                <span className="block text-xs text-[var(--muted)]">成功</span>
+                <span className="mt-1 block text-xl font-semibold text-slate-950">{progress.success}</span>
+              </div>
+              <div className="rounded-md bg-slate-50 p-3">
+                <span className="block text-xs text-[var(--muted)]">失败</span>
+                <span className="mt-1 block text-xl font-semibold text-slate-950">{progress.fail}</span>
+              </div>
             </div>
+            {progress.total > 0 ? (
+              <div>
+                <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full bg-[var(--primary)] transition-all" style={{ width: `${progressPercent}%` }} />
+                </div>
+                <p className="mt-2 text-xs text-[var(--muted)]">{progress.latestMessage}</p>
+              </div>
+            ) : null}
+            {progress.fail > 0 ? (
+              <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                有图片上传失败，可以再次点击上传重试。
+              </p>
+            ) : null}
+            <Button className="w-full sm:w-auto" type="button" onClick={handleUpload} disabled={!configStatus.isReady || isUploading || items.length === 0}>
+              {isUploading ? "上传中..." : "上传并创建"}
+            </Button>
           </div>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">搜索题库</span>
-            <input
-              className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-              placeholder="按标题或简介实时搜索"
-              value={communitySearch}
-              onChange={(event) => setCommunitySearch(event.target.value)}
-            />
-            <span className="mt-2 block text-xs text-[var(--muted)]">
-              搜索会随输入实时过滤，当前显示 {filteredCommunitySets.length} / {communitySets.length} 个题库。
-            </span>
-          </label>
-          <div className="grid max-h-[54vh] gap-3 overflow-y-auto pr-1">
-            {filteredCommunitySets.map((item) => (
+        ) : null}
+
+        {mode === "urlText" ? (
+          <div className="space-y-4">
+            <div
+              className={`rounded-md border-2 border-dashed p-4 transition ${
+                isDraggingImport ? "border-rose-300 bg-rose-50" : "border-[var(--line)] bg-slate-50"
+              }`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsDraggingImport(true);
+              }}
+              onDragLeave={() => setIsDraggingImport(false)}
+              onDrop={handleImportDrop}
+            >
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                <p className="text-sm font-semibold text-slate-900">粘贴图片链接，或上传 JSONL</p>
+                <Button type="button" variant="secondary" onClick={() => jsonlInputRef.current?.click()}>
+                  选择 JSONL
+                </Button>
+              </div>
+              <input
+                ref={jsonlInputRef}
+                className="hidden"
+                type="file"
+                accept=".jsonl,application/json"
+                multiple
+                onChange={(event) => readJsonlFiles(event.target.files)}
+              />
+            </div>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-900">图片链接或 JSONL</span>
+              <textarea
+                className="min-h-52 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                placeholder={
+                  "https://res.cloudinary.com/.../image.webp\nhttps://res.cloudinary.com/.../image2.webp\n\n{\"image_url\":\"https://...jpg\",\"label_text\":\"动画名\"}"
+                }
+                value={urlText}
+                onChange={(event) => {
+                  setUrlText(event.target.value);
+                  resetCreatedSet();
+                  clearError();
+                }}
+              />
+            </label>
+            {importPreview.error ? (
+              <p className="text-sm text-red-600">{importPreview.error}</p>
+            ) : (
+              <p className="text-sm text-[var(--muted)]">
+                已识别 {importPreview.items.length} 张图片，{importPreview.labeledCount} 个带答案。
+              </p>
+            )}
+            <Button className="w-full sm:w-auto" type="button" onClick={handleCreateFromUrlText} disabled={isCreatingFromText}>
+              {isCreatingFromText ? "创建中..." : "创建题库"}
+            </Button>
+          </div>
+        ) : null}
+
+        {mode === "community" ? (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+              <label className="block flex-1">
+                <span className="mb-2 block text-sm font-medium text-slate-900">搜索题库</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  placeholder="标题或简介"
+                  value={communitySearch}
+                  onChange={(event) => setCommunitySearch(event.target.value)}
+                />
+              </label>
+              <div className="flex gap-2">
+                <select
+                  aria-label="社区题库排序"
+                  className="h-11 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+                  value={communitySort}
+                  onChange={(event) => {
+                    const nextSort = event.target.value as CommunitySort;
+                    setCommunitySort(nextSort);
+                    handleLoadCommunitySets(nextSort);
+                  }}
+                >
+                  <option value="latest">最新</option>
+                  <option value="rating">评分最高</option>
+                </select>
+                <Button className="h-11" type="button" variant="secondary" onClick={() => handleLoadCommunitySets()} disabled={isLoadingCommunity}>
+                  {isLoadingCommunity ? "加载中..." : "刷新"}
+                </Button>
+              </div>
+            </div>
+            <div className="grid max-h-[54vh] gap-3 overflow-y-auto pr-1">
+              {filteredCommunitySets.map((item) => (
                 <div
                   className="rounded-md border border-[var(--line)] bg-white p-3 text-left transition hover:border-rose-300 hover:bg-rose-50"
                   key={item.id}
                 >
-                  <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
-                    <div>
-                      <p className="font-semibold text-slate-950">{item.title}</p>
-                      <p className="mt-1 text-sm text-[var(--muted)]">{item.description || "暂无简介"}</p>
+                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-slate-950">{item.title}</p>
+                      <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{item.description || "暂无简介"}</p>
                       <p className="mt-2 text-xs text-[var(--muted)]">
-                        {item.imageCount} 张，评分 {Number(item.ratingAvg).toFixed(2)} / 5，{item.ratingCount} 人评分，创建于{" "}
-                        {new Date(item.createdAt).toLocaleDateString()}
+                        {item.imageCount} 张 · {Number(item.ratingAvg).toFixed(1)} 分 · {item.ratingCount} 人评分
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
@@ -628,15 +734,16 @@ export function QuestionSetUploader({
                   </div>
                 </div>
               ))}
-            {!isLoadingCommunity && communitySets.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">暂无社区题库，点击刷新列表或先发布一个题库。</p>
-            ) : null}
-            {!isLoadingCommunity && communitySets.length > 0 && filteredCommunitySets.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">没有匹配的社区题库。</p>
-            ) : null}
+              {!isLoadingCommunity && communitySets.length === 0 ? (
+                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">暂无社区题库。</p>
+              ) : null}
+              {!isLoadingCommunity && communitySets.length > 0 && filteredCommunitySets.length === 0 ? (
+                <p className="rounded-md bg-slate-50 px-4 py-5 text-sm text-[var(--muted)]">没有匹配的题库。</p>
+              ) : null}
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </section>
 
       {previewingCommunitySet ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
@@ -654,11 +761,11 @@ export function QuestionSetUploader({
                 <Button
                   type="button"
                   onClick={() => {
-                    void handleSelectCommunitySet(previewingCommunitySet);
+                    handleSelectCommunitySet(previewingCommunitySet);
                     setPreviewingCommunitySet(null);
                   }}
                 >
-                  选择题库
+                  用这个题库
                 </Button>
                 <button
                   className="rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
@@ -673,7 +780,6 @@ export function QuestionSetUploader({
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                 {getQuestionSetPreviewItems(previewingCommunitySet).map((item) => (
                   <figure className="rounded-md border border-[var(--line)] bg-slate-50 p-2" key={item.key}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img alt="" className="aspect-video w-full rounded bg-black object-contain" src={item.url} />
                     <figcaption className="mt-2 text-xs text-[var(--muted)]">
                       第 {item.index + 1} 张
@@ -687,54 +793,65 @@ export function QuestionSetUploader({
         </div>
       ) : null}
 
-      {questionSet ? (
-        <div ref={previewRef} className="rounded-md border border-[var(--line)] bg-slate-50 p-4 scroll-mt-4">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div>
-              <p className="font-semibold text-slate-950">{questionSet.title}</p>
-              <p className="mt-1 text-sm text-[var(--muted)]">
-                图片数量：{questionSet.imageCount}，{questionSet.isPublic ? "社区公开题库" : "未发布题库"}
-              </p>
-            </div>
-            <div className="text-sm font-semibold text-emerald-700">
-              {isNotifyingHost ? "正在通知房主..." : "题库已准备好，等待房主开始游戏。"}
-            </div>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-            {previewItems.slice(0, 12).map((item) => (
-              <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
-                <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写标签"}>
-                  {item.labelText?.trim() || "未填写标签"}
-                </figcaption>
-              </figure>
-            ))}
-            {previewUrls.length === 0
-              ? results.slice(0, 12).map((result) =>
-                  result.ok ? (
-                    <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
-                      <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写标签</figcaption>
-                    </figure>
-                  ) : null,
-                )
-              : null}
-          </div>
-          <label className="mt-4 block">
-            <span className="mb-2 block text-sm font-medium text-slate-900">image_urls_text</span>
-            <textarea
-              className="min-h-32 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs outline-none"
-              readOnly
-              value={urlsTextForPreview}
-            />
-          </label>
-          <Button className="mt-3" type="button" variant="secondary" onClick={handleCopyUrlsText}>
-            复制 URL 文本
-          </Button>
+      <section ref={previewRef} className="space-y-4 border-t border-[var(--line)] pt-5 scroll-mt-4">
+        <div className="flex items-center gap-3">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-900 text-sm font-bold text-white">2</span>
+          <h3 className="text-base font-semibold text-slate-950">确认题库</h3>
         </div>
-      ) : null}
+
+        {questionSet ? (
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+              <div>
+                <p className="font-semibold text-slate-950">{questionSet.title}</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  {questionSet.imageCount} 张图片，{questionSet.isPublic ? "社区公开题库" : "未发布题库"}
+                </p>
+              </div>
+              <Button type="button" onClick={handleConfirmQuestionSet} disabled={isConfirmingQuestionSet}>
+                {isConfirmingQuestionSet ? "确认中..." : "确认使用这个题库"}
+              </Button>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+              {previewItems.slice(0, 12).map((item) => (
+                <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={item.key}>
+                  <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={item.url} />
+                  <figcaption className="mt-2 truncate text-xs text-[var(--muted)]" title={item.labelText?.trim() || "未填写标签"}>
+                    {item.labelText?.trim() || "未填写标签"}
+                  </figcaption>
+                </figure>
+              ))}
+              {previewUrls.length === 0
+                ? results.slice(0, 12).map((result) =>
+                    result.ok ? (
+                      <figure className="rounded-md border border-[var(--line)] bg-white p-2" key={result.url}>
+                        <img alt="" className="aspect-square w-full rounded bg-black object-cover" src={result.url} />
+                        <figcaption className="mt-2 truncate text-xs text-[var(--muted)]">未填写标签</figcaption>
+                      </figure>
+                    ) : null,
+                  )
+                : null}
+            </div>
+            {urlsTextForPreview ? (
+              <details className="mt-4">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-900">URL 文本</summary>
+                <textarea
+                  className="mt-3 min-h-32 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs outline-none"
+                  readOnly
+                  value={urlsTextForPreview}
+                />
+                <Button className="mt-3" type="button" variant="secondary" onClick={handleCopyUrlsText}>
+                  复制 URL
+                </Button>
+              </details>
+            ) : null}
+          </div>
+        ) : (
+          <div className="rounded-md border border-dashed border-[var(--line)] bg-slate-50 px-4 py-6 text-sm text-[var(--muted)]">
+            创建或选择题库后，这里会显示预览。
+          </div>
+        )}
+      </section>
     </div>
   );
 }

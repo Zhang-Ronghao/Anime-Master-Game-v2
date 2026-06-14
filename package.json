@@ -3,26 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "dev": "vite --port 3000 --strictPort",
+    "build": "tsc --noEmit --incremental false && vite build",
+    "start": "vite preview",
+    "lint": "tsc --noEmit --incremental false",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "worker:typecheck": "tsc -p tsconfig.worker.json --noEmit",
+    "d1:migrate:local": "wrangler d1 migrations apply anime_master_game --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply anime_master_game --remote"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.45.4",
-    "next": "13.5.11",
     "react": "18.2.0",
     "react-dom": "18.2.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10",
     "eslint": "^8",
-    "eslint-config-next": "13.5.11",
     "postcss": "^8",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^8.0.16",
+    "wrangler": "^4.100.0"
   }
 }

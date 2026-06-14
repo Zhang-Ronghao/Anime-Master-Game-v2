@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/Button";
-import { supabase } from "@/lib/supabaseClient";
+import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
+  cancelForfeitAnswer,
   confirmRevealBlocks,
-  endCurrentGameEarly,
+  finalizeTeamBattleVote,
   getAnswersForQuestion,
   getAnswerForPlayerRound,
   getAnswersForQuestionRound,
@@ -16,16 +17,23 @@ import {
   getBuzzerAnswersForQuestionRound,
   getGameSessionById,
   getPlayerScores,
+  getQuestionSetById,
   getQuestionResultsForQuestion,
   getQuestionsByQuestionSetId,
   gradeAnswersAndAdvance,
+  judgeTeamBattleGuess,
   judgeBuzzerAnswer,
+  publishQuestionSetToCommunity,
+  revealTeamBattleAnswer,
   settleBuzzerRound,
   skipCurrentQuestion,
   submitAnswer,
   submitBuzzerAnswer,
+  submitForfeitAnswer,
+  submitTeamBattleGuessVote,
+  submitTeamBattleRevealVote,
   updateQuestionLabel,
-} from "@/lib/supabaseRooms";
+} from "@/lib/cloudflareRooms";
 import type {
   Answer,
   BuzzerAnswer,
@@ -36,8 +44,12 @@ import type {
   GameSession,
   PlayerScore,
   Question,
+  QuestionSet,
   QuestionResult,
   Room,
+  TeamBattleGuessVote,
+  TeamBattlePhase,
+  TeamBattleTeam,
 } from "@/types/game";
 
 type ImageRevealGameProps = {
@@ -52,6 +64,34 @@ const LANDSCAPE_GRID_COLUMNS = 9;
 const PORTRAIT_GRID_COLUMNS = 5;
 const TOTAL_BLOCKS = 45;
 const DEFAULT_ROUND_SECONDS = 60;
+const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
+const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
+const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
+
+function isForfeitAnswer(answer: Answer | null | undefined) {
+  return answer?.answerText === FORFEIT_ANSWER_TEXT;
+}
+
+function getAnswerDisplayText(answer: Answer | null | undefined) {
+  if (!answer) {
+    return "";
+  }
+
+  return isForfeitAnswer(answer) ? "已放弃" : answer.answerText;
+}
+
+function buildRetryImageUrl(imageUrl: string, retryAttempt: number, retryToken: number) {
+  if (retryAttempt <= 0 && retryToken <= 0) {
+    return imageUrl;
+  }
+
+  const hashIndex = imageUrl.indexOf("#");
+  const urlWithoutHash = hashIndex >= 0 ? imageUrl.slice(0, hashIndex) : imageUrl;
+  const hash = hashIndex >= 0 ? imageUrl.slice(hashIndex) : "";
+  const separator = urlWithoutHash.includes("?") ? "&" : "?";
+
+  return `${urlWithoutHash}${separator}amgImageRetry=${retryToken}-${retryAttempt}${hash}`;
+}
 
 function toGameSession(gameSession: DbGameSession): GameSession {
   const roundScores = Array.isArray(gameSession.round_scores)
@@ -85,13 +125,57 @@ function toGameSession(gameSession: DbGameSession): GameSession {
   };
 }
 
-function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS) {
+function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFAULT_ROUND_SECONDS, nowMs = Date.now()) {
   if (!roundStartedAt) {
     return roundSeconds;
   }
 
-  const elapsedSeconds = Math.floor((Date.now() - new Date(roundStartedAt).getTime()) / 1000);
+  const elapsedSeconds = Math.floor((nowMs - new Date(roundStartedAt).getTime()) / 1000);
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
+}
+
+function getTeamName(team: TeamBattleTeam) {
+  return team === "red" ? "红队" : "蓝队";
+}
+
+function getTeamTone(team: TeamBattleTeam) {
+  return team === "red"
+    ? {
+        border: "border-red-200",
+        panel: "border-red-200 bg-red-50",
+        text: "text-red-700",
+        soft: "bg-red-100 text-red-700",
+        solid: "bg-red-600 text-white",
+        ring: "ring-red-200",
+      }
+    : {
+        border: "border-sky-200",
+        panel: "border-sky-200 bg-sky-50",
+        text: "text-sky-700",
+        soft: "bg-sky-100 text-sky-700",
+        solid: "bg-sky-600 text-white",
+        ring: "ring-sky-200",
+      };
+}
+
+function getTeamBattlePhaseLabel(phase: TeamBattlePhase) {
+  if (phase === "REVEAL_VOTE") {
+    return "选格";
+  }
+
+  if (phase === "GUESS_VOTE") {
+    return "猜测";
+  }
+
+  if (phase === "JUDGING") {
+    return "判定";
+  }
+
+  return "复盘";
+}
+
+function getOpposingTeam(team: TeamBattleTeam): TeamBattleTeam {
+  return team === "red" ? "blue" : "red";
 }
 
 function toQuestion(question: DbQuestion): Question {
@@ -145,10 +229,107 @@ type AnswerBubble = {
   width: number;
 };
 
+type ResultPublishNextAction = "advanceReviewedQuestion" | "skipQuestion";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isGameSession(value: unknown): value is GameSession {
+  return isRecord(value) && typeof value.id === "string" && typeof value.roomId === "string" && "currentQuestionIndex" in value;
+}
+
+function isAnswer(value: unknown): value is Answer {
+  return isRecord(value) && typeof value.id === "string" && typeof value.gameSessionId === "string" && "answerText" in value && "submittedAt" in value;
+}
+
+function isBuzzerAnswer(value: unknown): value is BuzzerAnswer {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.gameSessionId === "string" &&
+    "answerText" in value &&
+    "submittedAt" in value &&
+    typeof value.status === "string" &&
+    "scoreAwarded" in value
+  );
+}
+
+function isQuestion(value: unknown): value is Question {
+  return isRecord(value) && typeof value.id === "string" && typeof value.questionSetId === "string" && "orderIndex" in value;
+}
+
+function getBroadcastGameSession(result: unknown) {
+  if (isGameSession(result)) {
+    return result;
+  }
+
+  if (isRecord(result) && isGameSession(result.gameSession)) {
+    return result.gameSession;
+  }
+
+  return null;
+}
+
+function getBroadcastAnswer(result: unknown) {
+  return isAnswer(result) && !isBuzzerAnswer(result) ? result : null;
+}
+
+function getBroadcastBuzzerAnswer(result: unknown) {
+  if (isBuzzerAnswer(result)) {
+    return result;
+  }
+
+  if (isRecord(result) && isBuzzerAnswer(result.judgedAnswer)) {
+    return result.judgedAnswer;
+  }
+
+  return null;
+}
+
+function getBroadcastQuestion(result: unknown) {
+  return isQuestion(result) ? result : null;
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T) {
+  return items.some((currentItem) => currentItem.id === item.id)
+    ? items.map((currentItem) => (currentItem.id === item.id ? item : currentItem))
+    : [...items, item];
+}
+
+function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, revealedBlocks: number[]) {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const columns = height > width ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
+  const rows = TOTAL_BLOCKS / columns;
+  const blockWidth = width / columns;
+  const blockHeight = height / rows;
+
+  canvas.width = width;
+  canvas.height = height;
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, width, height);
+
+  for (const blockIndex of revealedBlocks) {
+    const column = blockIndex % columns;
+    const row = Math.floor(blockIndex / columns);
+    const sourceX = column * blockWidth;
+    const sourceY = row * blockHeight;
+
+    context.drawImage(image, sourceX, sourceY, blockWidth, blockHeight, sourceX, sourceY, blockWidth, blockHeight);
+  }
+}
+
 export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUpdated }: ImageRevealGameProps) {
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([]);
+  const [teamSelectedBlocks, setTeamSelectedBlocks] = useState<number[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [answerBubbles, setAnswerBubbles] = useState<Record<string, AnswerBubble>>({});
   const [buzzerAnswers, setBuzzerAnswers] = useState<BuzzerAnswer[]>([]);
@@ -156,37 +337,106 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [labelAnswers, setLabelAnswers] = useState<Answer[]>([]);
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null);
   const [answerText, setAnswerText] = useState("");
+  const [teamGuessText, setTeamGuessText] = useState("");
   const [labelInput, setLabelInput] = useState("");
+  const [resultPublishTitle, setResultPublishTitle] = useState("");
+  const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [selectedCorrectPlayerIds, setSelectedCorrectPlayerIds] = useState<string[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
+  const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [isGrading, setIsGrading] = useState(false);
   const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
+  const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
+  const [isFinalizingTeamBattle, setIsFinalizingTeamBattle] = useState(false);
+  const [isJudgingTeamBattle, setIsJudgingTeamBattle] = useState(false);
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
-  const [isEndingGame, setIsEndingGame] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
+  const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
+  const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
   const [isPortraitImage, setIsPortraitImage] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [playerImageRetryAttempt, setPlayerImageRetryAttempt] = useState(0);
+  const [playerImageRetryToken, setPlayerImageRetryToken] = useState(0);
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
+  const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const gameSessionRef = useRef<GameSession | null>(null);
+  const answerInputRef = useRef<HTMLInputElement | null>(null);
+  const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
     [room.players],
   );
+
+  function syncServerClock(nextGameSession: GameSession) {
+    if (!nextGameSession.serverNow) {
+      return;
+    }
+
+    const serverNowMs = new Date(nextGameSession.serverNow).getTime();
+    if (Number.isFinite(serverNowMs)) {
+      serverClockRef.current = {
+        serverNowMs,
+        clientNowMs: performance.now(),
+      };
+    }
+  }
+
+  function getEstimatedServerNowMs() {
+    const serverClock = serverClockRef.current;
+    if (!serverClock) {
+      return Date.now();
+    }
+
+    return serverClock.serverNowMs + (performance.now() - serverClock.clientNowMs);
+  }
+
+  function getClientRoundElapsedMs(targetGameSession: GameSession) {
+    if (!targetGameSession.roundStartedAt) {
+      return null;
+    }
+
+    const roundStartedAtMs = new Date(targetGameSession.roundStartedAt).getTime();
+    if (!Number.isFinite(roundStartedAtMs)) {
+      return null;
+    }
+
+    return Math.max(0, getEstimatedServerNowMs() - roundStartedAtMs);
+  }
+
+  function applyGameSession(nextGameSession: GameSession, options: { syncClock?: boolean } = {}) {
+    const shouldSyncClock = options.syncClock ?? true;
+    if (shouldSyncClock) {
+      syncServerClock(nextGameSession);
+    }
+    setGameSession(nextGameSession);
+    const nowMs =
+      shouldSyncClock || serverClockRef.current ? getEstimatedServerNowMs() : new Date(nextGameSession.serverNow ?? "").getTime();
+    setRemainingSeconds(
+      getRemainingSeconds(
+        nextGameSession.roundStartedAt,
+        nextGameSession.roundSeconds,
+        Number.isFinite(nowMs) ? nowMs : Date.now(),
+      ),
+    );
+  }
 
   const refreshRoundData = useCallback(
     async (targetGameSession: GameSession) => {
@@ -202,30 +452,56 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setQuestionResults(nextResults);
 
       if (targetGameSession.gameMode === "ROUND_REVEAL") {
-        const nextAnswers = await getAnswersForQuestionRound({
-          gameSessionId: targetGameSession.id,
-          questionIndex: targetGameSession.currentQuestionIndex,
-          revealRound: targetGameSession.currentRevealRound,
-        });
+        const [nextAnswers, nextBuzzerAnswers] = await Promise.all([
+          getAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+          getBuzzerAnswersForQuestionRound({
+            gameSessionId: targetGameSession.id,
+            questionIndex: targetGameSession.currentQuestionIndex,
+            revealRound: targetGameSession.currentRevealRound,
+          }),
+        ]);
         setAnswers(nextAnswers);
-        setBuzzerAnswers([]);
-        setMyBuzzerAnswer(null);
+        setBuzzerAnswers(nextBuzzerAnswers);
 
         if (isPresenter) {
           const nextLabelAnswers = await getAnswersForQuestion({
             gameSessionId: targetGameSession.id,
             questionIndex: targetGameSession.currentQuestionIndex,
           });
-          setLabelAnswers(nextLabelAnswers);
+          setLabelAnswers(nextLabelAnswers.filter((answer) => !isForfeitAnswer(answer)));
+          setMyBuzzerAnswer(null);
         } else {
-          const nextMyAnswer = await getAnswerForPlayerRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-            playerId,
-          });
+          const [nextMyAnswer, nextMyBuzzerAnswer] = await Promise.all([
+            getAnswerForPlayerRound({
+              gameSessionId: targetGameSession.id,
+              questionIndex: targetGameSession.currentQuestionIndex,
+              revealRound: targetGameSession.currentRevealRound,
+              playerId,
+            }),
+            getBuzzerAnswerForPlayerRound({
+              gameSessionId: targetGameSession.id,
+              questionIndex: targetGameSession.currentQuestionIndex,
+              revealRound: targetGameSession.currentRevealRound,
+              playerId,
+            }),
+          ]);
           setLabelAnswers([]);
           setMyAnswer(nextMyAnswer);
+          setMyBuzzerAnswer(nextMyBuzzerAnswer);
+        }
+      } else if (targetGameSession.gameMode === "TEAM_BATTLE") {
+        setAnswers([]);
+        setBuzzerAnswers([]);
+        setMyAnswer(null);
+        setMyBuzzerAnswer(null);
+        if (isPresenter) {
+          setLabelAnswers([]);
+        } else {
+          setLabelAnswers([]);
         }
       } else {
         const [nextBuzzerAnswers, nextLabelAnswers] = await Promise.all([
@@ -305,6 +581,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, []);
 
   useEffect(() => {
+    gameSessionRef.current = gameSession;
+  }, [gameSession]);
+
+  useEffect(() => {
     let isMounted = true;
 
     async function loadGame() {
@@ -324,10 +604,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         const loadedQuestions = await getQuestionsByQuestionSetId(loadedGameSession.questionSetId);
 
         if (isMounted) {
-          setGameSession(loadedGameSession);
+          applyGameSession(loadedGameSession);
           setQuestions(loadedQuestions);
           setImageLoadFailed(false);
-          setRemainingSeconds(getRemainingSeconds(loadedGameSession.roundStartedAt, loadedGameSession.roundSeconds));
           await refreshRoundData(loadedGameSession);
         }
       } catch (error) {
@@ -353,159 +632,126 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
-    const channel = supabase
-      .channel(`game-session:${room.currentGameId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "game_sessions",
-          filter: `id=eq.${room.currentGameId}`,
-        },
-        (payload) => {
-          const nextGameSession = toGameSession(payload.new as DbGameSession);
-          setGameSession(nextGameSession);
-          setImageLoadFailed(false);
-          setSelectedBlocks([]);
-          setSelectedCorrectPlayerIds([]);
-          setRemainingSeconds(getRemainingSeconds(nextGameSession.roundStartedAt, nextGameSession.roundSeconds));
-          refreshRoundData(nextGameSession).catch((error) => {
-            onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "player_scores",
-          filter: `game_session_id=eq.${room.currentGameId}`,
-        },
-        () => {
-          getPlayerScores(room.currentGameId ?? "")
-            .then(setScores)
-            .catch((error) => onError(error instanceof Error ? error.message : "刷新积分失败。"));
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "question_results",
-          filter: `game_session_id=eq.${room.currentGameId}`,
-        },
-        () => {
-          if (!gameSession) {
+    return subscribeRealtimeTopic(`game:${room.currentGameId}`, (message) => {
+      const pushedQuestion = getBroadcastQuestion(message.result);
+      if (pushedQuestion) {
+        setQuestions((currentQuestions) =>
+          currentQuestions.map((question) => (question.id === pushedQuestion.id ? pushedQuestion : question)),
+        );
+        return;
+      }
+
+      const currentGameSession = gameSessionRef.current;
+      const pushedGameSession = getBroadcastGameSession(message.result);
+      const applyPushedGameSession = () => {
+        if (!pushedGameSession || pushedGameSession.id !== room.currentGameId) {
+          return false;
+        }
+
+        applyGameSession(pushedGameSession, { syncClock: !serverClockRef.current });
+        setImageLoadFailed(false);
+        setSelectedBlocks([]);
+        setSelectedCorrectPlayerIds([]);
+        refreshRoundData(pushedGameSession).catch((error) => {
+          onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
+        });
+        return true;
+      };
+
+      const pushedAnswer = getBroadcastAnswer(message.result);
+      if (pushedAnswer && currentGameSession?.id === pushedAnswer.gameSessionId) {
+        if (
+          pushedAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
+          pushedAnswer.revealRound === currentGameSession.currentRevealRound
+        ) {
+          setAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
+          if (isPresenter) {
+            if (!isForfeitAnswer(pushedAnswer)) {
+              setLabelAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
+              showAnswerBubble(pushedAnswer);
+            }
+            if (currentGameSession.gameMode === "ROUND_REVEAL") {
+              refreshRoundData(currentGameSession).catch((error) => {
+                onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
+              });
+            }
+          }
+          if (pushedAnswer.playerId === playerId) {
+            setMyAnswer(pushedAnswer);
+          }
+        }
+        if (applyPushedGameSession()) {
+          return;
+        }
+        return;
+      }
+
+      const pushedBuzzerAnswer = getBroadcastBuzzerAnswer(message.result);
+      if (pushedBuzzerAnswer && currentGameSession?.id === pushedBuzzerAnswer.gameSessionId) {
+        if (
+          pushedBuzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
+          pushedBuzzerAnswer.revealRound === currentGameSession.currentRevealRound
+        ) {
+          setBuzzerAnswers((currentAnswers) => upsertById(currentAnswers, pushedBuzzerAnswer));
+          if (isPresenter) {
+            showAnswerBubble({
+              id: pushedBuzzerAnswer.id,
+              gameSessionId: pushedBuzzerAnswer.gameSessionId,
+              questionIndex: pushedBuzzerAnswer.questionIndex,
+              revealRound: pushedBuzzerAnswer.revealRound,
+              playerId: pushedBuzzerAnswer.playerId,
+              answerText: pushedBuzzerAnswer.answerText,
+              submittedAt: pushedBuzzerAnswer.submittedAt,
+            });
+          }
+          if (pushedBuzzerAnswer.playerId === playerId) {
+            setMyBuzzerAnswer(pushedBuzzerAnswer);
+          }
+        }
+        if (applyPushedGameSession()) {
+          return;
+        }
+        return;
+      }
+
+      if (applyPushedGameSession()) {
+        return;
+      }
+
+      getGameSessionById(room.currentGameId ?? "")
+        .then(async (nextGameSession) => {
+          if (!nextGameSession) {
+            onError("当前游戏不存在。");
             return;
           }
 
-          refreshRoundData(gameSession).catch((error) => {
-            onError(error instanceof Error ? error.message : "刷新判分结果失败。");
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "questions",
-        },
-        (payload) => {
-          const nextQuestion = toQuestion(payload.new as DbQuestion);
-
-          setQuestions((currentQuestions) =>
-            currentQuestions.map((question) => (question.id === nextQuestion.id ? nextQuestion : question)),
-          );
-        },
-      );
-
-    channel.on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "answers",
-        filter: `game_session_id=eq.${room.currentGameId}`,
-      },
-      (payload) => {
-        if (!gameSession) {
-          return;
-        }
-
-        if (payload.eventType !== "DELETE") {
-          const changedAnswer = toAnswer(payload.new as DbAnswer);
-          const isCurrentRoundAnswer =
-            changedAnswer.questionIndex === gameSession.currentQuestionIndex &&
-            changedAnswer.revealRound === gameSession.currentRevealRound;
-
-          if (isPresenter && isCurrentRoundAnswer) {
-            showAnswerBubble(changedAnswer);
-          }
-        }
-
-        refreshRoundData(gameSession).catch((error) => {
-          onError(error instanceof Error ? error.message : "刷新答案失败。");
+          const nextQuestions = await getQuestionsByQuestionSetId(nextGameSession.questionSetId);
+          applyGameSession(nextGameSession);
+          setQuestions(nextQuestions);
+          setImageLoadFailed(false);
+          setSelectedBlocks([]);
+          setSelectedCorrectPlayerIds([]);
+          await refreshRoundData(nextGameSession);
+        })
+        .catch((error) => {
+          onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
         });
-      },
-    );
-
-    channel.on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "buzzer_answers",
-        filter: `game_session_id=eq.${room.currentGameId}`,
-      },
-      (payload) => {
-        if (!gameSession) {
-          return;
-        }
-
-        if (payload.eventType !== "DELETE") {
-          const changedAnswer = toBuzzerAnswer(payload.new as DbBuzzerAnswer);
-          const isCurrentRoundAnswer =
-            changedAnswer.questionIndex === gameSession.currentQuestionIndex &&
-            changedAnswer.revealRound === gameSession.currentRevealRound;
-
-          if (isPresenter && isCurrentRoundAnswer) {
-            showAnswerBubble({
-              id: changedAnswer.id,
-              gameSessionId: changedAnswer.gameSessionId,
-              questionIndex: changedAnswer.questionIndex,
-              revealRound: changedAnswer.revealRound,
-              playerId: changedAnswer.playerId,
-              answerText: changedAnswer.answerText,
-              submittedAt: changedAnswer.submittedAt,
-            });
-          }
-        }
-
-        refreshRoundData(gameSession).catch((error) => {
-          onError(error instanceof Error ? error.message : "刷新抢答队列失败。");
-        });
-      },
-    );
-
-    channel.subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [gameSession, isPresenter, onError, refreshRoundData, room.currentGameId, showAnswerBubble]);
+    });
+  }, [isPresenter, onError, playerId, refreshRoundData, room.currentGameId, showAnswerBubble]);
 
   useEffect(() => {
     setAnswerBubbles({});
     setAnswerText("");
+    setTeamGuessText("");
+    setTeamSelectedBlocks([]);
+    setIsRevealPreviewOpen(false);
   }, [gameSession?.id, gameSession?.currentQuestionIndex, gameSession?.currentRevealRound]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRemainingSeconds(getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds));
+      setRemainingSeconds(
+        getRemainingSeconds(gameSession?.roundStartedAt, gameSession?.roundSeconds, getEstimatedServerNowMs()),
+      );
     }, 500);
 
     return () => window.clearInterval(timer);
@@ -513,6 +759,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const currentQuestion = gameSession ? questions[gameSession.currentQuestionIndex] : null;
   const currentQuestionLabel = currentQuestion?.labelText?.trim() ?? "";
+  const revealedBlocksKey = (gameSession?.revealedBlocks ?? []).join(",");
   const gridColumns = isPortraitImage ? PORTRAIT_GRID_COLUMNS : LANDSCAPE_GRID_COLUMNS;
   const gridRows = TOTAL_BLOCKS / gridColumns;
   const revealedBlockSet = useMemo(() => new Set(gameSession?.revealedBlocks ?? []), [gameSession?.revealedBlocks]);
@@ -521,25 +768,163 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     () => new Set([...(gameSession?.revealedBlocks ?? []), ...selectedBlocks]),
     [gameSession?.revealedBlocks, selectedBlocks],
   );
+
+  useEffect(() => {
+    setImageLoadFailed(false);
+    setPlayerImageRetryAttempt(0);
+    setPlayerImageRetryToken(0);
+    playerLoadedImageRef.current = null;
+  }, [currentQuestion?.id]);
+
+  useLayoutEffect(() => {
+    if (isPresenter || !currentQuestion) {
+      return;
+    }
+
+    const canvas = playerImageCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    let isCanceled = false;
+    let retryTimer: number | undefined;
+    const context = canvas.getContext("2d");
+    const fallbackWidth = Math.max(1, canvas.width || 1);
+    const fallbackHeight = Math.max(1, canvas.height || 1);
+    canvas.width = fallbackWidth;
+    canvas.height = fallbackHeight;
+    if (context) {
+      context.fillStyle = "#000";
+    }
+    context?.fillRect(0, 0, fallbackWidth, fallbackHeight);
+
+    const cachedImage = playerLoadedImageRef.current;
+    if (
+      cachedImage &&
+      cachedImage.questionId === currentQuestion.id &&
+      cachedImage.imageUrl === currentQuestion.imageUrl &&
+      cachedImage.image.complete
+    ) {
+      drawRevealedBlocksOnCanvas(canvas, cachedImage.image, gameSession?.revealedBlocks ?? []);
+      return;
+    }
+
+    const image = new Image();
+    image.onload = () => {
+      if (isCanceled) {
+        return;
+      }
+
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+        setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+      }
+
+      setImageLoadFailed(false);
+      playerLoadedImageRef.current = { questionId: currentQuestion.id, imageUrl: currentQuestion.imageUrl, image };
+      drawRevealedBlocksOnCanvas(canvas, image, gameSession?.revealedBlocks ?? []);
+    };
+    image.onerror = () => {
+      if (isCanceled) {
+        return;
+      }
+
+      if (playerImageRetryAttempt < MAX_IMAGE_AUTO_RETRY_COUNT) {
+        const retryDelay = IMAGE_RETRY_DELAYS_MS[playerImageRetryAttempt] ?? IMAGE_RETRY_DELAYS_MS.at(-1) ?? 3200;
+        retryTimer = window.setTimeout(() => {
+          if (!isCanceled) {
+            setPlayerImageRetryAttempt((attempt) => Math.min(MAX_IMAGE_AUTO_RETRY_COUNT, attempt + 1));
+          }
+        }, retryDelay);
+        return;
+      }
+
+      setImageLoadFailed(true);
+    };
+    image.src = buildRetryImageUrl(currentQuestion.imageUrl, playerImageRetryAttempt, playerImageRetryToken);
+
+    return () => {
+      isCanceled = true;
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
+      image.onload = null;
+      image.onerror = null;
+    };
+  }, [currentQuestion, gameSession?.revealedBlocks, isPresenter, playerImageRetryAttempt, playerImageRetryToken, revealedBlocksKey]);
+
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
-  const currentScore = gameSession?.roundScores[Math.min(maxRevealRounds, currentRound) - 1] ?? 1;
-  const isBuzzerMode = gameSession?.gameMode !== "ROUND_REVEAL";
+  const currentScore =
+    gameSession?.roundScores[currentRound - 1] ?? Math.max(1, maxRevealRounds - currentRound + 1);
+  const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
+  const teamBattleState = gameSession?.teamBattleState ?? null;
+  const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
-  const isQuestionReviewing = !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
+  const isQuestionReviewing = isTeamBattleMode
+    ? teamBattleState?.phase === "REVIEW"
+    : !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
   const shouldShowQuestionLabel = Boolean(currentQuestion) && (isPresenter || isQuestionReviewing);
   const hasNextQuestion = gameSession ? gameSession.currentQuestionIndex + 1 < questions.length : false;
   const isCurrentPlayerCorrect = correctPlayerSet.has(playerId);
   const guessers = room.players.filter((player) => player.id !== room.currentPresenterPlayerId);
+  const teamBattlePlayerTeam: TeamBattleTeam | null = teamBattleState?.teams.red.includes(playerId)
+    ? "red"
+    : teamBattleState?.teams.blue.includes(playerId)
+      ? "blue"
+      : null;
+  const teamBattleActiveTeam = teamBattleState?.activeTeam ?? "red";
+  const teamBattleActiveMembers = teamBattleState?.teams[teamBattleActiveTeam] ?? [];
+  const teamBattleCanAct = Boolean(!isPresenter && teamBattlePlayerTeam === teamBattleActiveTeam && teamBattleState);
+  const canSeeTeamBattleVotes = Boolean(isPresenter || teamBattlePlayerTeam === teamBattleActiveTeam);
+  const canSeeTeamBattleCountdown = canSeeTeamBattleVotes;
+  const teamBattleAvailableBlockCount = Math.max(0, TOTAL_BLOCKS - revealedBlockSet.size);
+  const teamBattleRequiredBlockCount = Math.min(teamBattleState?.revealLimit ?? 1, teamBattleAvailableBlockCount);
+  const teamBattleVoteSeconds = teamBattleState?.voteDeadlineAt
+    ? Math.max(0, Math.ceil((new Date(teamBattleState.voteDeadlineAt).getTime() - teamBattleClockMs) / 1000))
+    : null;
+  const teamBattleRevealVoteCounts = useMemo(() => {
+    const counts: Record<number, number> = {};
+    for (const blocks of Object.values(teamBattleState?.revealVotes ?? {})) {
+      for (const block of blocks) {
+        counts[block] = (counts[block] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [teamBattleState?.revealVotes]);
+  const teamBattleGuessOptions = useMemo(() => {
+    const options = new Map<string, { key: string; label: string; vote: TeamBattleGuessVote; count: number }>();
+    for (const vote of Object.values(teamBattleState?.guessVotes ?? {})) {
+      const key = vote.type === "skip" ? "__skip__" : `guess:${vote.answerText}`;
+      const label = vote.type === "skip" ? "不猜" : vote.answerText ?? "";
+      const current = options.get(key);
+      options.set(key, {
+        key,
+        label,
+        vote,
+        count: (current?.count ?? 0) + 1,
+      });
+    }
+    return Array.from(options.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }, [teamBattleState?.guessVotes]);
   const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
+  const currentQuestionScoreByPlayerId = useMemo(() => {
+    const scoreByPlayerId = new Map<string, number>();
+    for (const result of questionResults) {
+      scoreByPlayerId.set(result.playerId, (scoreByPlayerId.get(result.playerId) ?? 0) + result.scoreAwarded);
+    }
+    return scoreByPlayerId;
+  }, [questionResults]);
   const pendingBuzzerAnswers = buzzerAnswers.filter((answer) => answer.status === "pending");
   const currentBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
+  const hasUnsubmittedGuessers = activeGuessers.some((player) => !currentRoundAnswerPlayerSet.has(player.id));
+  const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
     activeGuessers.length > 0 && activeGuessers.every((player) => buzzerAnswerPlayerSet.has(player.id));
   const allActiveGuessersSubmitted =
@@ -552,8 +937,94 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       correctCount: scores.find((score) => score.playerId === player.id)?.correctCount ?? 0,
     }))
     .sort((a, b) => b.score - a.score);
+  const teamBattleScoreRows = teamBattleState
+    ? (["red", "blue"] as const)
+        .map((team) => ({
+          team,
+          score: teamBattleState.teamScores[team],
+          members: teamBattleState.teams[team].map((memberId) => {
+            const player = room.players.find((currentPlayer) => currentPlayer.id === memberId);
+
+            return {
+              id: memberId,
+              nickname: player?.nickname ?? memberId,
+            };
+          }),
+        }))
+        .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
+    : [];
+  const teamBattleActiveTone = getTeamTone(teamBattleActiveTeam);
+  const teamBattlePlayerTone = teamBattlePlayerTeam ? getTeamTone(teamBattlePlayerTeam) : null;
+  const teamBattlePhaseLabel = teamBattleState ? getTeamBattlePhaseLabel(teamBattleState.phase) : "";
+  const teamBattleRevealSubmittedCount = Object.keys(teamBattleState?.revealVotes ?? {}).length;
+  const teamBattleGuessSubmittedCount = Object.keys(teamBattleState?.guessVotes ?? {}).length;
+  const teamBattleSubmittedCount =
+    teamBattleState?.phase === "REVEAL_VOTE"
+      ? teamBattleRevealSubmittedCount
+      : teamBattleState?.phase === "GUESS_VOTE"
+        ? teamBattleGuessSubmittedCount
+        : 0;
+  const teamBattleVoteTotal = teamBattleActiveMembers.length;
+  const teamBattleVoteProgress = teamBattleVoteTotal > 0 ? (teamBattleSubmittedCount / teamBattleVoteTotal) * 100 : 0;
+  const teamBattleHasSubmittedRevealVote = Boolean(teamBattleState?.revealVotes[playerId]);
+  const teamBattleHasSubmittedGuessVote = Boolean(teamBattleState?.guessVotes[playerId]);
+  const teamBattleHasSubmittedCurrentVote =
+    teamBattleState?.phase === "REVEAL_VOTE"
+      ? teamBattleHasSubmittedRevealVote
+      : teamBattleState?.phase === "GUESS_VOTE"
+        ? teamBattleHasSubmittedGuessVote
+        : false;
+  const teamBattleIsVoteClosed = teamBattleVoteSeconds === 0;
+  let teamBattleTaskTitle = "等待本题开始";
+  let teamBattleTaskDetail = "观察图片与队伍状态";
+  let teamBattleTaskMeta = "";
+  let teamBattleTaskTone = "border-slate-200 bg-white";
+  let teamBattleTaskBadge = "待机";
+
+  if (teamBattleState) {
+    if (isPresenter) {
+      teamBattleTaskTone = "border-slate-200 bg-white";
+      teamBattleTaskBadge = "裁判";
+      if (teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess) {
+        teamBattleTaskTitle = "判定猜测";
+        teamBattleTaskDetail = "点猜对或猜错";
+      } else if (teamBattleState.phase === "REVIEW") {
+        teamBattleTaskTitle = "复盘答案";
+        teamBattleTaskDetail = hasNextQuestion ? "切到下一张" : "查看排行榜";
+      } else {
+        teamBattleTaskTitle = `等待${getTeamName(teamBattleActiveTeam)}`;
+        teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
+      }
+    } else if (!teamBattlePlayerTeam) {
+      teamBattleTaskTitle = "观战";
+      teamBattleTaskDetail = "等待下一局分队";
+    } else if (teamBattleCanAct && teamBattleState.phase === "REVEAL_VOTE") {
+      teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
+      teamBattleTaskBadge = teamBattleHasSubmittedRevealVote ? "可修改" : "轮到你";
+      teamBattleTaskTitle = teamBattleHasSubmittedRevealVote ? "已提交选格" : "点图选格";
+      teamBattleTaskDetail = "";
+      teamBattleTaskMeta = `${teamSelectedBlocks.length}/${teamBattleRequiredBlockCount} 个`;
+    } else if (teamBattleCanAct && teamBattleState.phase === "GUESS_VOTE") {
+      teamBattleTaskTone = `${teamBattlePlayerTone?.border ?? "border-emerald-200"} bg-white`;
+      teamBattleTaskBadge = teamBattleHasSubmittedGuessVote ? "可修改" : "轮到你";
+      teamBattleTaskTitle = teamBattleHasSubmittedGuessVote ? "已提交猜测票" : "投票猜或不猜";
+      teamBattleTaskDetail = "";
+      teamBattleTaskMeta = teamBattleHasSubmittedGuessVote ? "可改投" : "二选一";
+    } else if (teamBattleState.phase === "JUDGING") {
+      teamBattleTaskTitle = "等待裁判";
+      teamBattleTaskDetail = "正在判定";
+    } else if (teamBattleState.phase === "REVIEW") {
+      teamBattleTaskTitle = "查看答案";
+      teamBattleTaskDetail = "等待下一题";
+    } else {
+      teamBattleTaskTitle = `等待${getTeamName(teamBattleActiveTeam)}`;
+      teamBattleTaskDetail = `${teamBattlePhaseLabel}中`;
+    }
+  }
+
   const canConfirmReveal =
     isPresenter &&
+    !isTeamBattleMode &&
     selectedBlocks.length > 0 &&
     !isConfirmingReveal &&
     !isQuestionReviewing &&
@@ -561,7 +1032,34 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
-    !isPresenter && !isBuzzerMode && !isQuestionReviewing && !isCurrentPlayerCorrect && isRoundActive && answerText.trim().length > 0;
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    answerText.trim().length > 0 &&
+    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending") &&
+    (!myHasForfeited || hasUnsubmittedGuessers);
+  const canForfeitAnswer =
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    !myHasForfeited &&
+    (!myAnswer || hasUnsubmittedGuessers) &&
+    (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
+  const canCancelForfeit =
+    !isPresenter &&
+    !isBuzzerMode &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
+    !isCurrentPlayerCorrect &&
+    isRoundActive &&
+    myHasForfeited &&
+    hasUnsubmittedGuessers;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
     isBuzzerMode &&
@@ -570,16 +1068,203 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !myBuzzerAnswer &&
     isRoundActive &&
     answerText.trim().length > 0;
-  const canGrade = isPresenter && !isBuzzerMode && !isQuestionReviewing && hasRoundStarted && Boolean(gameSession);
-  const canJudgeBuzzer = isPresenter && isBuzzerMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
-  const canSettleBuzzerRound =
-    isPresenter &&
+  const canTypeBuzzerAnswer =
+    !isPresenter &&
     isBuzzerMode &&
     !isQuestionReviewing &&
-    isRoundEnded &&
+    !isCurrentPlayerCorrect &&
+    !myBuzzerAnswer &&
+    isRoundActive;
+  const canGrade = false;
+  const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
+  const canSettleBuzzerRound =
+    isPresenter &&
+    !isTeamBattleMode &&
+    !isQuestionReviewing &&
     pendingBuzzerAnswers.length === 0 &&
+    (isBuzzerMode ? isRoundEnded : hasRoundStarted && (isRoundEnded || allActiveGuessersSubmitted)) &&
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
+  const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
+  const canPreviewTeamBattleOriginal =
+    isPresenter && isTeamBattleMode && Boolean(teamBattleState) && !isQuestionReviewing && !imageLoadFailed;
+  const canHoldRevealPreview = canPreviewSelectedBlocks || canPreviewTeamBattleOriginal;
+
+  useEffect(() => {
+    if (!canTypeBuzzerAnswer || !gameSession?.roundStartedAt) {
+      return;
+    }
+
+    const focusTimer = window.setTimeout(() => {
+      answerInputRef.current?.focus();
+      answerInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [
+    canTypeBuzzerAnswer,
+    gameSession?.currentQuestionIndex,
+    gameSession?.currentRevealRound,
+    gameSession?.roundStartedAt,
+  ]);
+
+  const standardModeLabel =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "抢答"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? "顺位"
+        : "轮揭";
+  const rankedNextScore = Math.max(1, guessers.length - questionResults.length);
+  const scoreCardLabel =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "答对分数"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? "下一名分数"
+        : "本轮分数";
+  const scoreCardValue =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "1 分"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? `${rankedNextScore} 分`
+        : `${currentScore} 分`;
+  const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
+  const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
+  const isBuzzerSettleToReview =
+    isBuzzerMode &&
+    (currentRound >= maxRevealRounds ||
+      (gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0) ||
+      (guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id))));
+  const buzzerSettleActionText = isBuzzerSettleToReview ? "公布答案" : "进入下一轮";
+  const standardSettleActionText = isBuzzerMode ? buzzerSettleActionText : currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+  let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
+  let standardTaskTitle = "等待开始";
+  let standardTaskDetail = "等待出题人揭露图片";
+  let standardTaskTone = "border-slate-200 bg-white";
+
+  if (!isTeamBattleMode && !isQuestionReviewing) {
+    if (isPresenter) {
+      standardTaskBadge = "出题人";
+      if (isBuzzerMode) {
+        if (currentBuzzerAnswer) {
+          standardTaskTitle = "判定抢答";
+          standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+        } else if (!hasRoundStarted) {
+          standardTaskTitle = "选格揭图";
+          standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+        } else if (isRoundEnded && (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance)) {
+          standardTaskTitle = buzzerSettleActionText;
+          standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
+        } else {
+          standardTaskTitle = "等待抢答";
+          standardTaskDetail = `${pendingBuzzerAnswers.length} 人排队`;
+        }
+      } else if (currentBuzzerAnswer) {
+        standardTaskTitle = "判定答案";
+        standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+      } else if (isRoundEnded || allActiveGuessersSubmitted) {
+        standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
+      } else if (!hasRoundStarted) {
+        standardTaskTitle = "选格揭图";
+        standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
+      } else {
+        standardTaskTitle = "等待作答";
+        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
+      }
+    } else if (isCurrentPlayerCorrect) {
+      standardTaskBadge = "完成";
+      standardTaskTone = "border-emerald-200 bg-emerald-50";
+      standardTaskTitle = "已答对";
+      standardTaskDetail = "等待下一题";
+    } else if (!hasRoundStarted) {
+      standardTaskTitle = "等待揭图";
+      standardTaskDetail = "出题人正在选格";
+    } else if (isBuzzerMode) {
+      if (myBuzzerAnswer?.status === "pending") {
+        standardTaskTitle = "等待判定";
+        standardTaskDetail = `已抢答：${myBuzzerAnswer.answerText}`;
+      } else if (myBuzzerAnswer?.status === "wrong") {
+        standardTaskTitle = "本轮已答错";
+        standardTaskDetail = "等待下一轮";
+      } else if (isRoundEnded) {
+        standardTaskTitle = "等待结算";
+        standardTaskDetail = "本轮抢答结束";
+      } else {
+        standardTaskTone = "border-emerald-200 bg-white";
+        standardTaskTitle = "提交抢答";
+        standardTaskDetail = "输入答案后提交";
+      }
+    } else if (!isBuzzerMode && myBuzzerAnswer?.status === "pending") {
+      standardTaskTitle = "等待判定";
+      standardTaskDetail = `已提交：${myBuzzerAnswer.answerText}`;
+    } else if (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") {
+      standardTaskTitle = "本轮已答错";
+      standardTaskDetail = "等待下一轮";
+    } else if (isRoundEnded) {
+      standardTaskTitle = "等待判定";
+      standardTaskDetail = "本轮已结束";
+    } else if (myHasForfeited) {
+      standardTaskTone = "border-slate-200 bg-white";
+      standardTaskTitle = "已放弃";
+      standardTaskDetail = hasUnsubmittedGuessers ? "可提交答案或取消放弃" : "等待结算";
+    } else if (myAnswer) {
+      standardTaskTone = "border-emerald-200 bg-white";
+      standardTaskTitle = "已提交答案";
+      standardTaskDetail = "截止前可修改";
+    } else {
+      standardTaskTone = "border-emerald-200 bg-white";
+      standardTaskTitle = "输入答案";
+      standardTaskDetail = "提交后可修改";
+    }
+  }
+
+  useEffect(() => {
+    if (!canHoldRevealPreview) {
+      setIsRevealPreviewOpen(false);
+      return;
+    }
+
+    function isTypingTarget(target: EventTarget | null) {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+
+      return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key.toLowerCase() !== "v" || event.repeat || isTypingTarget(event.target)) {
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && activeElement.closest("[data-reveal-grid-button='true']")) {
+        activeElement.blur();
+      }
+      setIsRevealPreviewOpen(true);
+    }
+
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.key.toLowerCase() === "v") {
+        setIsRevealPreviewOpen(false);
+      }
+    }
+
+    function handleBlur() {
+      setIsRevealPreviewOpen(false);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [canHoldRevealPreview]);
 
   useEffect(() => {
     setLabelInput("");
@@ -617,6 +1302,45 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setLastAutoLabelKey(autoLabelKey);
     }
   }, [canAddQuestionLabel, gameSession, isJudgeModalOpen, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
+
+  useEffect(() => {
+    if (!gameSession || !teamBattleState?.voteDeadlineAt || isFinalizingTeamBattle) {
+      return;
+    }
+
+    const delayMs = Math.max(0, new Date(teamBattleState.voteDeadlineAt).getTime() - Date.now());
+    const timer = window.setTimeout(() => {
+      setIsFinalizingTeamBattle(true);
+      finalizeTeamBattleVote({ gameSessionId: gameSession.id })
+        .then(async (finalized) => {
+          applyGameSession(finalized.gameSession);
+          setSelectedBlocks([]);
+          setTeamSelectedBlocks([]);
+          await refreshRoundData(finalized.gameSession);
+        })
+        .catch((error) => {
+          onError(error instanceof Error ? error.message : "结算团队投票失败。");
+        })
+        .finally(() => {
+          setIsFinalizingTeamBattle(false);
+        });
+    }, delayMs + 80);
+
+    return () => window.clearTimeout(timer);
+  }, [gameSession, isFinalizingTeamBattle, onError, refreshRoundData, teamBattleState?.voteDeadlineAt]);
+
+  useEffect(() => {
+    if (!teamBattleState?.voteDeadlineAt) {
+      return;
+    }
+
+    setTeamBattleClockMs(Date.now());
+    const timer = window.setInterval(() => {
+      setTeamBattleClockMs(Date.now());
+    }, 250);
+
+    return () => window.clearInterval(timer);
+  }, [teamBattleState?.voteDeadlineAt]);
 
   async function saveQuestionLabel(params: { labelText: string; source: "manual" | "answer"; answerId?: string | null }) {
     if (!gameSession || !currentQuestion || !canAddQuestionLabel) {
@@ -682,6 +1406,30 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     );
   }
 
+  function toggleTeamBattleBlock(blockIndex: number) {
+    if (
+      !teamBattleCanAct ||
+      teamBattleState?.phase !== "REVEAL_VOTE" ||
+      revealedBlockSet.has(blockIndex) ||
+      teamBattleVoteSeconds === 0
+    ) {
+      return;
+    }
+
+    setTeamSelectedBlocks((currentBlocks) => {
+      if (currentBlocks.includes(blockIndex)) {
+        return currentBlocks.filter((block) => block !== blockIndex);
+      }
+
+      if (currentBlocks.length >= teamBattleRequiredBlockCount) {
+        return currentBlocks;
+      }
+
+      const nextBlocks = [...currentBlocks, blockIndex].sort((a, b) => a - b);
+      return nextBlocks;
+    });
+  }
+
   function toggleCorrectPlayer(targetPlayerId: string) {
     if (correctPlayerSet.has(targetPlayerId)) {
       return;
@@ -706,15 +1454,112 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         selectedBlocks,
       });
-      setGameSession(updatedGameSession);
+      applyGameSession(updatedGameSession);
       setSelectedBlocks([]);
-      setRemainingSeconds(getRemainingSeconds(updatedGameSession.roundStartedAt, updatedGameSession.roundSeconds));
       await refreshRoundData(updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "确认揭露失败。");
     } finally {
       setIsConfirmingReveal(false);
     }
+  }
+
+  async function handleSubmitTeamBattleRevealVote() {
+    if (!gameSession || !teamBattleState) {
+      return;
+    }
+
+    setIsSubmittingTeamBattle(true);
+    try {
+      const updatedGameSession = await submitTeamBattleRevealVote({
+        gameSessionId: gameSession.id,
+        playerId,
+        selectedBlocks: teamSelectedBlocks,
+      });
+      applyGameSession(updatedGameSession);
+      await refreshRoundData(updatedGameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提交揭露投票失败。");
+    } finally {
+      setIsSubmittingTeamBattle(false);
+    }
+  }
+
+  async function handleSubmitTeamBattleGuessVote(vote: TeamBattleGuessVote) {
+    if (!gameSession || !teamBattleState) {
+      return;
+    }
+
+    setIsSubmittingTeamBattle(true);
+    try {
+      const updatedGameSession = await submitTeamBattleGuessVote({
+        gameSessionId: gameSession.id,
+        playerId,
+        vote,
+      });
+      applyGameSession(updatedGameSession);
+      await refreshRoundData(updatedGameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "提交猜测投票失败。");
+    } finally {
+      setIsSubmittingTeamBattle(false);
+    }
+  }
+
+  async function handleJudgeTeamBattleGuess(isCorrect: boolean) {
+    if (!gameSession || !teamBattleState?.pendingGuess) {
+      return;
+    }
+
+    setIsJudgingTeamBattle(true);
+    try {
+      const judged = await judgeTeamBattleGuess({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+        isCorrect,
+      });
+      applyGameSession(judged.gameSession);
+      setTeamSelectedBlocks([]);
+      await refreshRoundData(judged.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "判定团队猜测失败。");
+    } finally {
+      setIsJudgingTeamBattle(false);
+    }
+  }
+
+  async function handleRevealTeamBattleAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    const confirmed = window.confirm("确认直接公布答案吗？本题红蓝两队都不会加分。");
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSkippingQuestion(true);
+    try {
+      const revealed = await revealTeamBattleAnswer({
+        gameSessionId: gameSession.id,
+        presenterPlayerId: playerId,
+      });
+      applyGameSession(revealed.gameSession);
+      setImageLoadFailed(false);
+      setTeamSelectedBlocks([]);
+      await refreshRoundData(revealed.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "公布答案失败。");
+    } finally {
+      setIsSkippingQuestion(false);
+    }
+  }
+
+  function handleReloadPlayerImage() {
+    setImageLoadFailed(false);
+    setPlayerImageRetryAttempt(0);
+    playerLoadedImageRef.current = null;
+    setPlayerImageRetryToken((token) => token + 1);
   }
 
   async function handleSubmitAnswer() {
@@ -738,6 +1583,50 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function handleSubmitForfeitAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSubmittingAnswer(true);
+    try {
+      const submitted = await submitForfeitAnswer({
+        gameSessionId: gameSession.id,
+        playerId,
+      });
+      setMyAnswer(submitted);
+      setMyBuzzerAnswer(null);
+      setAnswerText("");
+      await refreshRoundData(gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "放弃本轮失败。");
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  }
+
+  async function handleCancelForfeitAnswer() {
+    if (!gameSession) {
+      return;
+    }
+
+    setIsSubmittingAnswer(true);
+    try {
+      const canceled = await cancelForfeitAnswer({
+        gameSessionId: gameSession.id,
+        playerId,
+      });
+      applyGameSession(canceled.gameSession);
+      setMyAnswer(null);
+      setAnswerText("");
+      await refreshRoundData(canceled.gameSession);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "取消放弃失败。");
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  }
+
   async function handleSubmitBuzzerAnswer() {
     if (!gameSession) {
       return;
@@ -749,6 +1638,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         playerId,
         answerText,
+        clientRoundElapsedMs: getClientRoundElapsedMs(gameSession),
       });
       setMyBuzzerAnswer(submitted);
       setAnswerText(submitted.answerText);
@@ -758,6 +1648,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     } finally {
       setIsSubmittingAnswer(false);
     }
+  }
+
+  function handleAnswerInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || !isBuzzerMode || !canSubmitBuzzerAnswer || isSubmittingAnswer) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSubmitBuzzerAnswer();
   }
 
   async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
@@ -773,11 +1672,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         buzzerAnswerId: currentBuzzerAnswer.id,
         isCorrect,
       });
-      setGameSession(judged.gameSession);
-      setRemainingSeconds(getRemainingSeconds(judged.gameSession.roundStartedAt, judged.gameSession.roundSeconds));
+      applyGameSession(judged.gameSession);
       await refreshRoundData(judged.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "判定抢答失败。");
+      onError(error instanceof Error ? error.message : "判定答案失败。");
     } finally {
       setIsJudgingBuzzer(false);
     }
@@ -794,11 +1692,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         gameSessionId: gameSession.id,
         presenterPlayerId: playerId,
       });
-      setGameSession(settled.gameSession);
-      setRemainingSeconds(getRemainingSeconds(settled.gameSession.roundStartedAt, settled.gameSession.roundSeconds));
+      applyGameSession(settled.gameSession);
       await refreshRoundData(settled.gameSession);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "结算抢答轮次失败。");
+      onError(error instanceof Error ? error.message : "结算本轮失败。");
     } finally {
       setIsSettlingBuzzerRound(false);
     }
@@ -816,11 +1713,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         correctPlayerIds: selectedCorrectPlayerIds,
       });
-      setGameSession(graded.gameSession);
+      applyGameSession(graded.gameSession);
       setImageLoadFailed(false);
       setSelectedCorrectPlayerIds([]);
       setSelectedBlocks([]);
-      setRemainingSeconds(getRemainingSeconds(graded.gameSession.roundStartedAt, graded.gameSession.roundSeconds));
 
       if (graded.room) {
         onRoomUpdated?.(graded.room);
@@ -833,6 +1729,45 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     } finally {
       setIsGrading(false);
     }
+  }
+
+  async function performSkipQuestion() {
+    if (!gameSession) {
+      return;
+    }
+
+    const skipped = await skipCurrentQuestion({
+      gameSessionId: gameSession.id,
+      presenterPlayerId: playerId,
+    });
+    applyGameSession(skipped.gameSession);
+    setImageLoadFailed(false);
+    setSelectedBlocks([]);
+    setSelectedCorrectPlayerIds([]);
+
+    if (skipped.room) {
+      onRoomUpdated?.(skipped.room);
+    }
+
+    await refreshRoundData(skipped.gameSession);
+  }
+
+  async function maybeOpenResultPublishPrompt(nextAction: ResultPublishNextAction) {
+    if (!gameSession) {
+      return false;
+    }
+
+    const questionSet = await getQuestionSetById(gameSession.questionSetId);
+
+    if (!questionSet || questionSet.isPublic || questionSet.createdByPlayerId !== playerId) {
+      return false;
+    }
+
+    setResultPublishQuestionSet(questionSet);
+    setResultPublishNextAction(nextAction);
+    setResultPublishTitle("");
+    setResultPublishDescription("");
+    return true;
   }
 
   async function handleSkipQuestion() {
@@ -848,26 +1783,41 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     setIsSkippingQuestion(true);
     try {
-      const skipped = await skipCurrentQuestion({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      setGameSession(skipped.gameSession);
-      setImageLoadFailed(false);
-      setSelectedBlocks([]);
-      setSelectedCorrectPlayerIds([]);
-      setRemainingSeconds(getRemainingSeconds(skipped.gameSession.roundStartedAt, skipped.gameSession.roundSeconds));
+      if (!hasNextQuestion) {
+        const isWaitingForPublishDecision = await maybeOpenResultPublishPrompt("skipQuestion");
 
-      if (skipped.room) {
-        onRoomUpdated?.(skipped.room);
+        if (isWaitingForPublishDecision) {
+          return;
+        }
       }
 
-      await refreshRoundData(skipped.gameSession);
+      await performSkipQuestion();
     } catch (error) {
       onError(error instanceof Error ? error.message : "跳过本题失败。");
     } finally {
       setIsSkippingQuestion(false);
     }
+  }
+
+  async function finishReviewedQuestion() {
+    if (!gameSession || !isPresenter || !isQuestionReviewing) {
+      return;
+    }
+
+    const advanced = await advanceReviewedQuestion({
+      gameSessionId: gameSession.id,
+      presenterPlayerId: playerId,
+    });
+    applyGameSession(advanced.gameSession);
+    setImageLoadFailed(false);
+    setSelectedBlocks([]);
+    setSelectedCorrectPlayerIds([]);
+
+    if (advanced.room) {
+      onRoomUpdated?.(advanced.room);
+    }
+
+    await refreshRoundData(advanced.gameSession);
   }
 
   async function handleAdvanceReviewedQuestion() {
@@ -877,21 +1827,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     setIsAdvancingQuestion(true);
     try {
-      const advanced = await advanceReviewedQuestion({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      setGameSession(advanced.gameSession);
-      setImageLoadFailed(false);
-      setSelectedBlocks([]);
-      setSelectedCorrectPlayerIds([]);
-      setRemainingSeconds(getRemainingSeconds(advanced.gameSession.roundStartedAt, advanced.gameSession.roundSeconds));
+      if (!hasNextQuestion) {
+        const isWaitingForPublishDecision = await maybeOpenResultPublishPrompt("advanceReviewedQuestion");
 
-      if (advanced.room) {
-        onRoomUpdated?.(advanced.room);
+        if (isWaitingForPublishDecision) {
+          return;
+        }
       }
 
-      await refreshRoundData(advanced.gameSession);
+      await finishReviewedQuestion();
     } catch (error) {
       onError(error instanceof Error ? error.message : "切换图片失败。");
     } finally {
@@ -899,29 +1843,71 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
-  async function handleEndGameEarly() {
-    if (!gameSession) {
+  async function continueAfterResultPublishPrompt(nextAction: ResultPublishNextAction) {
+    if (nextAction === "skipQuestion") {
+      setIsSkippingQuestion(true);
+      try {
+        await performSkipQuestion();
+      } finally {
+        setIsSkippingQuestion(false);
+      }
       return;
     }
 
-    const confirmed = window.confirm("确定要提前结束本局游戏并进入排行榜吗？");
-
-    if (!confirmed) {
-      return;
-    }
-
-    setIsEndingGame(true);
+    setIsAdvancingQuestion(true);
     try {
-      const ended = await endCurrentGameEarly({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      setGameSession(ended.gameSession);
-      onRoomUpdated?.(ended.room);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "提前结束本局失败。");
+      await finishReviewedQuestion();
     } finally {
-      setIsEndingGame(false);
+      setIsAdvancingQuestion(false);
+    }
+  }
+
+  function closeResultPublishPrompt() {
+    setResultPublishQuestionSet(null);
+    setResultPublishNextAction(null);
+  }
+
+  async function handleSkipResultPublish() {
+    if (!resultPublishNextAction) {
+      closeResultPublishPrompt();
+      return;
+    }
+
+    const nextAction = resultPublishNextAction;
+    closeResultPublishPrompt();
+    try {
+      await continueAfterResultPublishPrompt(nextAction);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "进入排行榜失败。");
+    }
+  }
+
+  async function handleConfirmResultPublish() {
+    if (!resultPublishQuestionSet || !resultPublishNextAction || !gameSession) {
+      return;
+    }
+
+    if (!resultPublishTitle.trim()) {
+      onError("请先填写题库标题。");
+      return;
+    }
+
+    const questionSet = resultPublishQuestionSet;
+    const nextAction = resultPublishNextAction;
+    setIsPublishingBeforeResult(true);
+    try {
+      await publishQuestionSetToCommunity({
+        questionSetId: questionSet.id,
+        playerId,
+        title: resultPublishTitle.trim(),
+        description: resultPublishDescription.trim(),
+      });
+      closeResultPublishPrompt();
+      await continueAfterResultPublishPrompt(nextAction);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "发布到社区失败。");
+    } finally {
+      setIsPublishingBeforeResult(false);
     }
   }
 
@@ -938,50 +1924,116 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
-      <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-        {scoreRows.map(({ player, score, correctCount }, index) => {
-          const alreadyCorrect = correctPlayerSet.has(player.id);
-          const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
-          const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
-          return (
-            <div
-              className="rounded-md bg-slate-50 px-3 py-2 text-sm"
-              key={player.id}
-              ref={(element) => {
-                scoreRowRefs.current[player.id] = element;
-              }}
+      {isTeamBattleMode && teamBattleState ? (
+        <>
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-semibold text-slate-950">我的身份</span>
+            <span
+              className={[
+                "shrink-0 rounded px-3 py-1 text-sm font-bold",
+                isPresenter
+                  ? "bg-slate-900 text-white"
+                  : teamBattlePlayerTone?.solid ?? "bg-slate-200 text-slate-700",
+              ].join(" ")}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0 font-semibold text-slate-950">
-                  #{index + 1} {player.nickname}
+              {isPresenter ? "裁判" : teamBattlePlayerTeam ? getTeamName(teamBattlePlayerTeam) : "观战"}
+            </span>
+          </div>
+          <p className="mb-2 text-sm font-semibold text-slate-900">队伍</p>
+          <div className="grid gap-2">
+            {teamBattleScoreRows.map((row, index) => {
+              const isActiveTeam = teamBattleState.activeTeam === row.team;
+              const tone = getTeamTone(row.team);
+
+              return (
+                <div
+                  className={[
+                    "rounded-md border px-3 py-3 text-sm",
+                    tone.panel,
+                    isActiveTeam ? `ring-2 ${tone.ring}` : "",
+                  ].join(" ")}
+                  key={row.team}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-[var(--muted)]">#{index + 1}</p>
+                      <p className={["font-bold", tone.text].join(" ")}>
+                        {getTeamName(row.team)}
+                        {isActiveTeam ? " · 行动中" : ""}
+                      </p>
+                    </div>
+                    <span className="text-xl font-bold text-slate-950">{row.score}</span>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    {row.members.map((member) => (
+                      <div
+                        className={[
+                          "rounded-md bg-white/80 px-3 py-2",
+                          member.id === playerId ? "ring-2 ring-slate-900/10" : "",
+                        ].join(" ")}
+                        key={member.id}
+                      >
+                        <span className="block truncate font-semibold text-slate-950">{member.nickname}</span>
+                        {member.id === playerId ? <span className="text-xs font-semibold text-[var(--muted)]">你</span> : null}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
-                <span>答对 {correctCount} 题</span>
-                {!isPresenter && alreadyCorrect ? (
-                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
-                ) : null}
-                {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
-                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
-                ) : null}
-                {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
-                  <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
-                    {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
-                  </span>
-                ) : null}
-                {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
-                  <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
-                ) : null}
-                {isBuzzerMode && alreadyCorrect ? (
-                  <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mb-2 text-sm font-semibold text-slate-900">实时积分榜</p>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+            {scoreRows.map(({ player, score, correctCount }, index) => {
+              const alreadyCorrect = correctPlayerSet.has(player.id);
+              const hasAnsweredCurrentRound = currentRoundAnswerPlayerSet.has(player.id);
+              const buzzerAnswer = buzzerAnswers.find((answer) => answer.playerId === player.id);
+              const currentQuestionScoreAwarded = currentQuestionScoreByPlayerId.get(player.id) ?? 0;
+              return (
+                <div
+                  className="rounded-md bg-slate-50 px-3 py-2 text-sm"
+                  key={player.id}
+                  ref={(element) => {
+                    scoreRowRefs.current[player.id] = element;
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 font-semibold text-slate-950">
+                      #{index + 1} {player.nickname}
+                    </div>
+                    <div className="shrink-0 font-semibold text-[var(--primary)]">{score}</div>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                    <span>答对 {correctCount} 题</span>
+                    {alreadyCorrect ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">已答对</span>
+                    ) : null}
+                    {currentQuestionScoreAwarded > 0 ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                        +{currentQuestionScoreAwarded} 分
+                      </span>
+                    ) : null}
+                    {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
+                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
+                    ) : null}
+                    {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
+                      <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                        {pendingBuzzerAnswers[0]?.id === buzzerAnswer.id ? "判定中" : "排队中"}
+                      </span>
+                    ) : null}
+                    {isBuzzerMode && buzzerAnswer?.status === "wrong" ? (
+                      <span className="rounded bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">本轮已答错</span>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 
@@ -994,36 +2046,98 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           maxWidth: isPortraitImage ? `min(1280px, calc(78vh * ${imageAspectRatio}))` : "1280px",
         }}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          alt=""
-          className="h-full w-full object-cover"
-          src={currentQuestion.imageUrl}
-          onLoad={(event) => {
-            const image = event.currentTarget;
-            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-              setImageAspectRatio(image.naturalWidth / image.naturalHeight);
-              setIsPortraitImage(image.naturalHeight > image.naturalWidth);
-            }
-          }}
-          onError={() => setImageLoadFailed(true)}
-        />
+        {isPresenter ? (
+          <img
+            alt=""
+            className="h-full w-full object-cover"
+            src={currentQuestion.imageUrl}
+            onLoad={(event) => {
+              const image = event.currentTarget;
+              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+                setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+                setIsPortraitImage(image.naturalHeight > image.naturalWidth);
+              }
+            }}
+            onError={() => setImageLoadFailed(true)}
+          />
+        ) : (
+          <canvas
+            aria-label="已揭露的图片区域"
+            className="block h-full w-full bg-black"
+            key={currentQuestion.id}
+            ref={playerImageCanvasRef}
+          />
+        )}
 
         {imageLoadFailed ? (
           <div className="absolute inset-0 z-10 grid place-items-center bg-slate-950 px-4 text-center text-white">
             <div>
               <p className="text-lg font-semibold">图片加载失败</p>
-              <p className="mt-2 text-sm text-slate-300">可能是图片 URL 失效、跨域限制或网络异常。</p>
+              <p className="mt-2 text-sm text-slate-300">
+                {isPresenter ? "可能是图片 URL 失效、跨域限制或网络异常。" : "已自动重试 3 次，可能是图片 URL 失效或网络异常。"}
+              </p>
               {isPresenter ? (
                 <Button className="mt-4" type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
                   {isSkippingQuestion ? "跳过中..." : "跳过本题"}
                 </Button>
-              ) : null}
+              ) : (
+                <Button className="mt-4" type="button" variant="secondary" onClick={handleReloadPlayerImage}>
+                  重新加载图片
+                </Button>
+              )}
             </div>
           </div>
         ) : null}
 
-        {!isPresenter && !imageLoadFailed ? (
+        {isTeamBattleMode && !imageLoadFailed ? (
+          <div
+            className="absolute inset-0 grid"
+            style={{
+              gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+              gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+            }}
+          >
+            {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => {
+              const isRevealed = revealedBlockSet.has(blockIndex);
+              const isSelected = teamSelectedBlocks.includes(blockIndex);
+              const voteCount = canSeeTeamBattleVotes ? teamBattleRevealVoteCounts[blockIndex] ?? 0 : 0;
+              const canPickBlock =
+                teamBattleCanAct &&
+                teamBattleState?.phase === "REVEAL_VOTE" &&
+                !isRevealed &&
+                teamBattleVoteSeconds !== 0;
+              const canSelectMoreBlocks = teamSelectedBlocks.length < teamBattleRequiredBlockCount;
+              const canPreviewBlock = canPickBlock && !isSelected && canSelectMoreBlocks;
+              const canToggleBlock = canPickBlock && (isSelected || canSelectMoreBlocks);
+
+              return (
+                <button
+                  aria-label={`方块 ${blockIndex + 1}`}
+                  className={[
+                    "relative border border-white/45 text-xs font-bold transition disabled:cursor-default",
+                    isRevealed ? "bg-transparent" : "bg-black",
+                    isSelected ? "ring-2 ring-inset ring-emerald-300 shadow-[inset_0_0_0_9999px_rgba(5,150,105,0.42)]" : "",
+                    canPreviewBlock
+                      ? "hover:ring-2 hover:ring-inset hover:ring-emerald-200 hover:shadow-[inset_0_0_0_9999px_rgba(16,185,129,0.24)]"
+                      : "",
+                  ].join(" ")}
+                  disabled={!canToggleBlock}
+                  key={blockIndex}
+                  type="button"
+                  onClick={() => toggleTeamBattleBlock(blockIndex)}
+                >
+                  {!isRevealed && voteCount > 0 ? (
+                    <span className="absolute left-1 top-1 grid h-5 min-w-5 place-items-center rounded bg-emerald-400 px-1 text-[11px] text-slate-950">
+                      {voteCount}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {!isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -1037,7 +2151,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           </div>
         ) : null}
 
-        {isPresenter && !imageLoadFailed ? (
+        {isPresenter && !isTeamBattleMode && !imageLoadFailed ? (
           <div
             className="absolute inset-0 grid"
             style={{
@@ -1053,11 +2167,12 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 <button
                   aria-label={`块 ${blockIndex + 1}`}
                   className={[
-                    "border border-white/60 transition",
+                    "border border-white/60 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-rose-200",
                     isRevealed ? "bg-emerald-400/30" : "",
                     isSelected ? "bg-rose-500/45" : "",
                     !isRevealed && !isSelected ? "hover:bg-rose-300/25" : "",
                   ].join(" ")}
+                  data-reveal-grid-button="true"
                   disabled={isRevealed || (Boolean(gameSession.roundStartedAt) && remainingSeconds > 0)}
                   key={blockIndex}
                   type="button"
@@ -1102,119 +2217,424 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             </Button>
           ) : null}
         </>
-      ) : isPresenter ? (
-        <>
-          <p className="text-sm font-semibold text-slate-950">出题人操作</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            已揭露 {revealedBlockSet.size} / {TOTAL_BLOCKS} 块，本轮已选择 {selectedBlocks.length} 块。
-          </p>
-          {isBuzzerMode ? (
-            <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <p className="font-semibold text-slate-950">抢答队列</p>
-              {currentBuzzerAnswer ? (
-                <div className="mt-2 rounded-md bg-slate-50 p-3">
-                  <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
-                  <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
+      ) : isTeamBattleMode && teamBattleState ? (
+        <div className="space-y-4">
+          <section className={["rounded-md border p-4", teamBattleTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{teamBattleTaskBadge}</span>
+              {teamBattleVoteSeconds !== null && canSeeTeamBattleCountdown ? (
+                <span className="rounded bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800">
+                  {teamBattleVoteSeconds}s
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">
+              {teamBattleTaskTitle}
+              {teamBattleTaskDetail || teamBattleTaskMeta ? (
+                <span className="ml-2 align-baseline text-sm font-medium text-[var(--muted)]">
+                  {teamBattleTaskDetail || teamBattleTaskMeta}
+                </span>
+              ) : null}
+            </p>
+          </section>
+
+          {teamBattleState.phase === "REVEAL_VOTE" || teamBattleState.phase === "GUESS_VOTE" ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">队内进度</span>
+                <span className="font-bold text-slate-950">
+                  {teamBattleSubmittedCount}/{teamBattleVoteTotal}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className={["h-full rounded-full", teamBattleActiveTone.solid].join(" ")}
+                  style={{ width: `${Math.min(100, teamBattleVoteProgress)}%` }}
+                />
+              </div>
+              {teamBattleHasSubmittedCurrentVote ? (
+                <p className="mt-2 text-xs font-semibold text-emerald-700">你已提交，截止前可改。</p>
+              ) : null}
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              {teamBattleIsVoteClosed ? <span className="text-xs font-semibold text-amber-700">结算中</span> : null}
+            </div>
+
+            {teamBattleState.phase === "REVEAL_VOTE" ? (
+              <div className="space-y-3">
+                <div className="rounded-md bg-white px-3 py-2 text-sm">
+                  <span className="font-semibold text-slate-950">选格：</span>
+                  <span className="text-[var(--muted)]">
+                    {teamSelectedBlocks.length}/{teamBattleRequiredBlockCount}
+                  </span>
+                </div>
+                {teamBattleCanAct ? (
+                  <Button
+                    className="w-full"
+                    type="button"
+                    onClick={handleSubmitTeamBattleRevealVote}
+                    disabled={
+                      isSubmittingTeamBattle ||
+                      teamSelectedBlocks.length !== teamBattleRequiredBlockCount ||
+                      teamBattleIsVoteClosed
+                    }
+                  >
+                    {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedRevealVote ? "更新选格" : "提交选格"}
+                  </Button>
+                ) : (
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                    {isPresenter ? "等待队员选格。" : "等待当前队伍完成选格。"}
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {teamBattleState.phase === "GUESS_VOTE" ? (
+              <div className="space-y-3">
+                {canSeeTeamBattleVotes ? (
+                  <div className="rounded-md bg-white p-3 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold text-slate-950">队内已投</p>
+                      {teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                        <span className="text-xs font-semibold text-[var(--muted)]">点一下跟投</span>
+                      ) : null}
+                    </div>
+                    {teamBattleGuessOptions.length > 0 ? (
+                      <div className="mt-2 max-h-48 space-y-2 overflow-y-auto pr-1">
+                        {teamBattleGuessOptions.map((option) => (
+                          <button
+                            className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-slate-50 px-3 py-2 text-left text-sm transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-default disabled:hover:border-[var(--line)] disabled:hover:bg-slate-50"
+                            disabled={!teamBattleCanAct || teamBattleIsVoteClosed || isSubmittingTeamBattle}
+                            key={option.key}
+                            type="button"
+                            onClick={() => {
+                              if (option.vote.type === "skip") {
+                                void handleSubmitTeamBattleGuessVote({ type: "skip" });
+                                return;
+                              }
+
+                              const nextAnswer = option.vote.answerText ?? "";
+                              setTeamGuessText(nextAnswer);
+                              void handleSubmitTeamBattleGuessVote({ type: "guess", answerText: nextAnswer });
+                            }}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate font-semibold text-slate-950">{option.label}</span>
+                              {teamBattleCanAct && !teamBattleIsVoteClosed ? (
+                                <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                                  {option.vote.type === "skip" ? "跟投不猜" : "采用并提交"}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="shrink-0 rounded bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-700">
+                              {option.count}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-sm text-[var(--muted)]">暂无队内投票。</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待当前队伍决定。</p>
+                )}
+
+                {teamBattleCanAct ? (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold text-slate-950">我的答案</p>
+                      <input
+                        className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                        maxLength={80}
+                        placeholder="输入答案"
+                        value={teamGuessText}
+                        onChange={(event) => setTeamGuessText(event.target.value)}
+                      />
+                      <Button
+                        className="w-full"
+                        type="button"
+                        onClick={() => handleSubmitTeamBattleGuessVote({ type: "guess", answerText: teamGuessText })}
+                        disabled={isSubmittingTeamBattle || teamGuessText.trim().length === 0 || teamBattleIsVoteClosed}
+                      >
+                        {isSubmittingTeamBattle ? "提交中..." : teamBattleHasSubmittedGuessVote ? "更新猜测" : "提交猜测"}
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--muted)]">
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                      <span>或者</span>
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                    </div>
+                    <button
+                      className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-4 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      type="button"
+                      onClick={() => handleSubmitTeamBattleGuessVote({ type: "skip" })}
+                      disabled={isSubmittingTeamBattle || teamBattleIsVoteClosed}
+                    >
+                      本轮不猜
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {teamBattleState.phase === "JUDGING" && teamBattleState.pendingGuess ? (
+              <div className="rounded-md bg-white p-3 text-sm">
+                <p className="font-semibold text-slate-950">{getTeamName(teamBattleState.pendingGuess.team)}猜测</p>
+                <p className="mt-2 break-words text-lg font-bold text-slate-950">{teamBattleState.pendingGuess.answerText}</p>
+                {isPresenter ? (
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
-                      答对
+                    <Button type="button" onClick={() => handleJudgeTeamBattleGuess(true)} disabled={isJudgingTeamBattle}>
+                      猜对
                     </Button>
                     <Button
                       type="button"
                       variant="secondary"
-                      onClick={() => handleJudgeBuzzerAnswer(false)}
-                      disabled={!canJudgeBuzzer || isJudgingBuzzer}
+                      onClick={() => handleJudgeTeamBattleGuess(false)}
+                      disabled={isJudgingTeamBattle}
                     >
-                      答错
+                      猜错
                     </Button>
                   </div>
-                </div>
-              ) : (
-                <p className="mt-2 text-[var(--muted)]">{hasRoundStarted ? "当前没有待判定抢答。" : "揭露后开始抢答。"}</p>
-              )}
-              <p className="mt-2 text-xs text-[var(--muted)]">
-                已排队 {pendingBuzzerAnswers.length} 人，本轮已用机会 {buzzerAnswers.length} / {activeGuessers.length}。
+                ) : (
+                  <p className="mt-2 text-[var(--muted)]">等待裁判。</p>
+                )}
+              </div>
+            ) : null}
+
+            {teamBattleState.phase === "REVIEW" ? (
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                本题已公布，等待切换。
               </p>
+            ) : null}
+          </section>
+
+          {isPresenter ? (
+            <div className="grid gap-2 border-t border-[var(--line)] pt-4">
+              {canPreviewTeamBattleOriginal ? (
+                <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
+                  按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览原图
+                </p>
+              ) : null}
+              <Button type="button" variant="secondary" onClick={handleRevealTeamBattleAnswer} disabled={isSkippingQuestion}>
+                {isSkippingQuestion ? "公布中..." : "公布答案"}
+              </Button>
             </div>
           ) : null}
-          <div className="mt-3 grid gap-2">
-            <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
-              {isConfirmingReveal ? "确认中..." : "确认揭露"}
-            </Button>
-            <button
-              className="rounded-md border border-[var(--line)] bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={imageLoadFailed || selectedBlocks.length === 0}
-              type="button"
-              onBlur={() => setIsRevealPreviewOpen(false)}
-              onContextMenu={(event) => event.preventDefault()}
-              onPointerCancel={() => setIsRevealPreviewOpen(false)}
-              onPointerDown={() => setIsRevealPreviewOpen(true)}
-              onPointerLeave={() => setIsRevealPreviewOpen(false)}
-              onPointerUp={() => setIsRevealPreviewOpen(false)}
-            >
-              按住预览玩家视角
-            </button>
-            {isBuzzerMode ? (
-              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
-                {isSettlingBuzzerRound ? "结算中..." : "结算本轮抢答"}
-              </Button>
-            ) : (
-              <Button type="button" onClick={() => setIsJudgeModalOpen(true)} disabled={!hasRoundStarted}>
-                判分
-              </Button>
-            )}
-            <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
-              {isSkippingQuestion ? "跳过中..." : "跳过本题"}
-            </Button>
-            <Button type="button" variant="secondary" onClick={handleEndGameEarly} disabled={isEndingGame}>
-              {isEndingGame ? "结束中..." : "结束本局游戏"}
-            </Button>
+        </div>
+      ) : isPresenter ? (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-950">本轮</p>
+            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
           </div>
-        </>
-      ) : (
-        <>
-          <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm">
-            <span className="text-[var(--muted)]">倒计时</span>
-            <span className="font-semibold text-slate-950">{hasRoundStarted ? `${remainingSeconds} 秒` : "等待开始"}</span>
-          </div>
-          {isCurrentPlayerCorrect ? (
-            <p className="text-sm font-semibold text-emerald-700">你已答对本题，后续轮次无需继续作答。</p>
-          ) : !hasRoundStarted ? (
-            <p className="text-sm text-[var(--muted)]">等待出题人揭露图片后开始答题。</p>
-          ) : (
-            <div className="space-y-3">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
-                <input
-                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  disabled={!isRoundActive || (isBuzzerMode && Boolean(myBuzzerAnswer))}
-                  maxLength={80}
-                  placeholder="输入动画名称"
-                  value={answerText}
-                  onChange={(event) => setAnswerText(event.target.value)}
-                />
-              </label>
-              <Button
-                className="w-full"
-                type="button"
-                onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
-                disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
+
+          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+              <span
+                className={[
+                  "rounded px-2 py-1 text-xs font-bold",
+                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                ].join(" ")}
               >
-                {isSubmittingAnswer ? "提交中..." : isBuzzerMode ? "提交抢答" : myAnswer ? "修改答案" : "提交答案"}
-              </Button>
-              <p className="text-sm text-[var(--muted)]">
-                {isBuzzerMode
-                  ? myBuzzerAnswer
-                    ? `本轮已抢答：${myBuzzerAnswer.answerText}`
-                    : "本轮尚未抢答"
-                  : myAnswer
-                    ? `已提交：${myAnswer.answerText}`
-                    : "本轮尚未提交答案"}
-                {isRoundEnded ? "，本轮已结束" : ""}
-              </p>
+                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+              </span>
             </div>
-          )}
-        </>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
+          </section>
+
+          {hasRoundStarted ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                <span className="font-bold text-slate-950">
+                  {standardSubmittedCount}/{standardTotalCount}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full bg-slate-900"
+                  style={{ width: `${Math.min(100, standardProgress)}%` }}
+                />
+              </div>
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-950">操控面板</p>
+              <span className="text-xs font-semibold text-[var(--muted)]">
+                已揭露 {revealedBlockSet.size}/{TOTAL_BLOCKS}
+              </span>
+            </div>
+
+            {hasRoundStarted ? (
+              <div className="mb-3 rounded-md bg-white p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold text-slate-950">{isBuzzerMode ? "抢答队列" : "待判定答案"}</p>
+                  <span className="text-xs font-semibold text-[var(--muted)]">{pendingBuzzerAnswers.length} 人待判定</span>
+                </div>
+                {currentBuzzerAnswer ? (
+                  <div className="mt-2 rounded-md bg-slate-50 p-3">
+                    <p className="font-semibold text-slate-950">{getPlayerName(currentBuzzerAnswer.playerId)}</p>
+                    <p className="mt-1 break-words text-[var(--muted)]">{currentBuzzerAnswer.answerText}</p>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <Button type="button" onClick={() => handleJudgeBuzzerAnswer(true)} disabled={!canJudgeBuzzer || isJudgingBuzzer}>
+                        答对
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => handleJudgeBuzzerAnswer(false)}
+                        disabled={!canJudgeBuzzer || isJudgingBuzzer}
+                      >
+                        答错
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
+                    {isBuzzerMode ? "当前没有待判定抢答。" : "当前没有待判定答案。"}
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            <div className="grid gap-2">
+              <Button type="button" onClick={handleConfirmReveal} disabled={!canConfirmReveal}>
+                {isConfirmingReveal ? "确认中..." : selectedBlocks.length > 0 ? `确认揭露 ${selectedBlocks.length} 格` : "确认揭露"}
+              </Button>
+              {canPreviewSelectedBlocks ? (
+                <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
+                  按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览玩家视角
+                </p>
+              ) : null}
+              <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
+                {isSettlingBuzzerRound ? "处理中..." : standardSettleActionText}
+              </Button>
+              <Button type="button" variant="secondary" onClick={handleSkipQuestion} disabled={isSkippingQuestion}>
+                {isSkippingQuestion ? "跳过中..." : "跳过本题"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-950">本轮</p>
+            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
+          </div>
+
+          <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
+              <span
+                className={[
+                  "rounded px-2 py-1 text-xs font-bold",
+                  hasRoundStarted ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700",
+                ].join(" ")}
+              >
+                {hasRoundStarted ? `${remainingSeconds}s` : "未开始"}
+              </span>
+            </div>
+            <p className="mt-3 text-2xl font-bold leading-tight text-slate-950">{standardTaskTitle}</p>
+            <p className="mt-1 text-sm font-medium text-[var(--muted)]">{standardTaskDetail}</p>
+          </section>
+
+          {hasRoundStarted ? (
+            <section className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-950">{isBuzzerMode ? "抢答进度" : "提交进度"}</span>
+                <span className="font-bold text-slate-950">
+                  {standardSubmittedCount}/{standardTotalCount}
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full bg-slate-900"
+                  style={{ width: `${Math.min(100, standardProgress)}%` }}
+                />
+              </div>
+            </section>
+          ) : null}
+
+          <section className="border-t border-[var(--line)] pt-4">
+            <p className="mb-3 text-sm font-semibold text-slate-950">操控面板</p>
+            {isCurrentPlayerCorrect ? (
+              <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                你已答对本题。
+              </p>
+            ) : !hasRoundStarted ? (
+              <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">等待出题人揭露图片。</p>
+            ) : (
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-900">你的答案</span>
+                  <input
+                    ref={answerInputRef}
+                    className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                    disabled={
+                      !isRoundActive ||
+                      (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
+                      (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") ||
+                      (myHasForfeited && !hasUnsubmittedGuessers)
+                    }
+                    maxLength={80}
+                    placeholder="输入动画名称"
+                    value={answerText}
+                    onChange={(event) => setAnswerText(event.target.value)}
+                    onKeyDown={handleAnswerInputKeyDown}
+                  />
+                </label>
+                <Button
+                  className="w-full"
+                  type="button"
+                  onClick={isBuzzerMode ? handleSubmitBuzzerAnswer : handleSubmitAnswer}
+                  disabled={(isBuzzerMode ? !canSubmitBuzzerAnswer : !canSubmitAnswer) || isSubmittingAnswer}
+                >
+                  {isSubmittingAnswer
+                    ? "提交中..."
+                    : isBuzzerMode
+                      ? "提交抢答（回车）"
+                      : myHasForfeited
+                        ? "提交答案"
+                        : myAnswer
+                          ? "修改答案"
+                          : "提交答案"}
+                </Button>
+                {!isBuzzerMode ? (
+                  <Button
+                    className="w-full"
+                    type="button"
+                    variant="secondary"
+                    onClick={myHasForfeited ? handleCancelForfeitAnswer : handleSubmitForfeitAnswer}
+                    disabled={(myHasForfeited ? !canCancelForfeit : !canForfeitAnswer) || isSubmittingAnswer}
+                  >
+                    {isSubmittingAnswer ? "处理中..." : myHasForfeited ? "取消放弃" : "放弃本轮"}
+                  </Button>
+                ) : null}
+                <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
+                  {isBuzzerMode
+                    ? myBuzzerAnswer
+                      ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                      : "本轮尚未抢答"
+                    : myBuzzerAnswer?.status === "wrong"
+                      ? `本轮已答错：${myBuzzerAnswer.answerText}`
+                    : myAnswer
+                      ? getAnswerDisplayText(myAnswer)
+                      : "本轮尚未提交答案"}
+                  {isRoundEnded ? "，本轮已结束" : ""}
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
       )}
     </div>
   );
@@ -1222,40 +2642,86 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   return (
     <div className="space-y-4">
       <div className={`${playingGridClass} text-sm`}>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">房间 / 当前玩家</p>
-          <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
-          <p className="mt-1 truncate text-xs text-[var(--muted)]">
-            {currentPlayerName}
-            {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">当前题号</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            {gameSession.currentQuestionIndex + 1} / {questions.length}
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">当前轮次</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            第 {currentRound} / {maxRevealRounds} 轮
-          </p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">本轮分数</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">倒计时</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
-        </div>
-        <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-          <p className="text-[var(--muted)]">已答对</p>
-          <p className="mt-1 text-lg font-semibold text-slate-950">
-            {questionResults.length} / {guessers.length}
-          </p>
-        </div>
+        {isTeamBattleMode && teamBattleState ? (
+          <>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
+              <p className="mt-1 truncate text-xs text-[var(--muted)]">
+                {currentPlayerName}
+                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前题号</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {gameSession.currentQuestionIndex + 1} / {questions.length}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">对抗回合</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">第 {teamBattleState.turnNumber} 回合</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前阶段</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{teamBattlePhaseLabel}</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">行动队伍</p>
+              <p className={["mt-1 text-lg font-bold", teamBattleActiveTone.text].join(" ")}>
+                {getTeamName(teamBattleActiveTeam)}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">投票</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {teamBattleState.phase === "JUDGING" || teamBattleState.phase === "REVIEW"
+                  ? "已结算"
+                  : `${teamBattleSubmittedCount} / ${teamBattleVoteTotal}`}
+              </p>
+              {teamBattleVoteSeconds !== null && canSeeTeamBattleCountdown ? (
+                <p className="mt-1 text-xs font-semibold text-amber-700">{teamBattleVoteSeconds} 秒</p>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">房间 / 当前玩家</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">房间 {room.code}</p>
+              <p className="mt-1 truncate text-xs text-[var(--muted)]">
+                {currentPlayerName}
+                {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前题号</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {gameSession.currentQuestionIndex + 1} / {questions.length}
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">当前轮次</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                第 {currentRound} / {maxRevealRounds} 轮
+              </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">{scoreCardLabel}</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">倒计时</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">已答对</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {questionResults.length} / {guessers.length}
+              </p>
+            </div>
+          </>
+        )}
       </div>
 
       <div className={playingGridClass}>
@@ -1275,19 +2741,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   maxWidth: isPortraitImage ? `min(80vw, calc(86vh * ${imageAspectRatio}))` : "min(92vw, 1280px)",
                 }}
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
-                <div
-                  className="absolute inset-0 grid"
-                  style={{
-                    gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
-                    <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
-                  ))}
-                </div>
+                {canPreviewSelectedBlocks ? (
+                  <div
+                    className="absolute inset-0 grid"
+                    style={{
+                      gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                      gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {Array.from({ length: TOTAL_BLOCKS }, (_, blockIndex) => (
+                      <div className={previewRevealedBlockSet.has(blockIndex) ? "bg-transparent" : "bg-black"} key={blockIndex} />
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>,
             document.body,
@@ -1385,6 +2852,58 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       ) : null}
 
+      {resultPublishQuestionSet ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
+          <div className="w-full max-w-xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
+            <div className="border-b border-[var(--line)] px-5 py-4">
+              <p className="text-lg font-semibold text-slate-950">发布到社区？</p>
+              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">建议发布，好题库可以让更多房间直接开玩。</p>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-slate-950">题库标题</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={80}
+                  placeholder="必填"
+                  value={resultPublishTitle}
+                  onChange={(event) => setResultPublishTitle(event.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-slate-950">简介</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={160}
+                  placeholder="可留空"
+                  value={resultPublishDescription}
+                  onChange={(event) => setResultPublishDescription(event.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-col justify-end gap-2 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleSkipResultPublish}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion || isSkippingQuestion}
+              >
+                不发布，查看排行榜
+              </Button>
+              <Button
+                type="button"
+                onClick={handleConfirmResultPublish}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion || isSkippingQuestion || !resultPublishTitle.trim()}
+              >
+                {isPublishingBeforeResult ? "发布中..." : "发布并查看排行榜"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {isJudgeModalOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
           <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
@@ -1426,7 +2945,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                         {player.nickname}
                         {alreadyCorrect ? "（已答对）" : ""}
                       </span>
-                      <span className="mt-1 block text-[var(--muted)]">{answer?.answerText || "本轮未提交"}</span>
+                      <span className="mt-1 block text-[var(--muted)]">{answer ? getAnswerDisplayText(answer) : "本轮未提交"}</span>
                     </span>
                   </label>
                 );

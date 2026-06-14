@@ -8,8 +8,32 @@ export type Player = {
 };
 
 export type RoomStatus = "LOBBY" | "QUESTION_SETUP" | "PLAYING" | "GAME_RESULT";
-export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED";
+export type GameMode = "ROUND_REVEAL" | "BUZZER_FIRST_CORRECT" | "BUZZER_RANKED" | "TEAM_BATTLE";
 export type BuzzerAnswerStatus = "pending" | "correct" | "wrong";
+export type TeamBattleTeam = "red" | "blue";
+export type TeamBattlePhase = "REVEAL_VOTE" | "GUESS_VOTE" | "JUDGING" | "REVIEW";
+
+export type TeamBattleGuessVote = {
+  type: "skip" | "guess";
+  answerText?: string;
+};
+
+export type TeamBattleState = {
+  teams: Record<TeamBattleTeam, string[]>;
+  activeTeam: TeamBattleTeam;
+  phase: TeamBattlePhase;
+  revealLimit: number;
+  turnNumber: number;
+  voteDeadlineAt?: string | null;
+  revealVotes: Record<string, number[]>;
+  guessVotes: Record<string, TeamBattleGuessVote>;
+  pendingGuess?: {
+    team: TeamBattleTeam;
+    answerText: string;
+  } | null;
+  teamScores: Record<TeamBattleTeam, number>;
+  message?: string | null;
+};
 
 export type Room = {
   id?: string;
@@ -90,6 +114,8 @@ export type GameSession = {
   roundSeconds: number;
   roundScores: number[];
   roundStartedAt?: string | null;
+  serverNow?: string;
+  teamBattleState?: TeamBattleState | null;
   createdAt: string;
   endedAt?: string | null;
 };
@@ -172,6 +198,7 @@ export type DbGameSession = {
   max_reveal_rounds?: number;
   round_seconds?: number;
   round_scores?: unknown;
+  team_battle_state?: unknown;
   round_started_at: string | null;
   created_at: string;
   ended_at: string | null;
