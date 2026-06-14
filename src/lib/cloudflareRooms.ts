@@ -241,8 +241,17 @@ export const publishQuestionSetToCommunity = (params: {
 export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number }) =>
   rpc<QuestionSet>("rateCommunityQuestionSet", params);
 
+export const getQuestionSetRatingProgress = (params: { questionSetId: string; playerIds: string[]; playerId?: string }) =>
+  rpc<{ ratedCount: number; totalCount: number; ratedPlayerIds: string[]; playerRating: number | null }>(
+    "getQuestionSetRatingProgress",
+    params,
+  );
+
 export const getQuestionResultsForQuestion = (params: { gameSessionId: string; questionIndex: number }) =>
   rpc<QuestionResult[]>("getQuestionResultsForQuestion", params);
+
+export const getQuestionResultsForGameSession = (gameSessionId: string) =>
+  rpc<QuestionResult[]>("getQuestionResultsForGameSession", gameSessionId);
 
 export const submitAnswer = (params: { gameSessionId: string; playerId: string; answerText: string }) =>
   rpc<Answer>("submitAnswer", params);

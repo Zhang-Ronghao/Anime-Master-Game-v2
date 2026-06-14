@@ -17,11 +17,13 @@ import {
   getBuzzerAnswersForQuestionRound,
   getGameSessionById,
   getPlayerScores,
+  getQuestionSetById,
   getQuestionResultsForQuestion,
   getQuestionsByQuestionSetId,
   gradeAnswersAndAdvance,
   judgeTeamBattleGuess,
   judgeBuzzerAnswer,
+  publishQuestionSetToCommunity,
   revealTeamBattleAnswer,
   settleBuzzerRound,
   skipCurrentQuestion,
@@ -42,6 +44,7 @@ import type {
   GameSession,
   PlayerScore,
   Question,
+  QuestionSet,
   QuestionResult,
   Room,
   TeamBattleGuessVote,
@@ -334,6 +337,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [answerText, setAnswerText] = useState("");
   const [teamGuessText, setTeamGuessText] = useState("");
   const [labelInput, setLabelInput] = useState("");
+  const [resultPublishTitle, setResultPublishTitle] = useState("");
+  const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
   const [selectedCorrectPlayerIds, setSelectedCorrectPlayerIds] = useState<string[]>([]);
@@ -351,8 +356,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isAdvancingQuestion, setIsAdvancingQuestion] = useState(false);
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
+  const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
+  const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
@@ -1736,6 +1743,27 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function finishReviewedQuestion() {
+    if (!gameSession || !isPresenter || !isQuestionReviewing) {
+      return;
+    }
+
+    const advanced = await advanceReviewedQuestion({
+      gameSessionId: gameSession.id,
+      presenterPlayerId: playerId,
+    });
+    applyGameSession(advanced.gameSession);
+    setImageLoadFailed(false);
+    setSelectedBlocks([]);
+    setSelectedCorrectPlayerIds([]);
+
+    if (advanced.room) {
+      onRoomUpdated?.(advanced.room);
+    }
+
+    await refreshRoundData(advanced.gameSession);
+  }
+
   async function handleAdvanceReviewedQuestion() {
     if (!gameSession || !isPresenter || !isQuestionReviewing) {
       return;
@@ -1743,23 +1771,62 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     setIsAdvancingQuestion(true);
     try {
-      const advanced = await advanceReviewedQuestion({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      applyGameSession(advanced.gameSession);
-      setImageLoadFailed(false);
-      setSelectedBlocks([]);
-      setSelectedCorrectPlayerIds([]);
+      if (!hasNextQuestion) {
+        const questionSet = await getQuestionSetById(gameSession.questionSetId);
 
-      if (advanced.room) {
-        onRoomUpdated?.(advanced.room);
+        if (questionSet && !questionSet.isPublic && questionSet.createdByPlayerId === playerId) {
+          setResultPublishQuestionSet(questionSet);
+          setResultPublishTitle("");
+          setResultPublishDescription("");
+          return;
+        }
       }
 
-      await refreshRoundData(advanced.gameSession);
+      await finishReviewedQuestion();
     } catch (error) {
       onError(error instanceof Error ? error.message : "切换图片失败。");
     } finally {
+      setIsAdvancingQuestion(false);
+    }
+  }
+
+  async function handleSkipResultPublish() {
+    setResultPublishQuestionSet(null);
+    setIsAdvancingQuestion(true);
+    try {
+      await finishReviewedQuestion();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "进入排行榜失败。");
+    } finally {
+      setIsAdvancingQuestion(false);
+    }
+  }
+
+  async function handleConfirmResultPublish() {
+    if (!resultPublishQuestionSet || !gameSession) {
+      return;
+    }
+
+    if (!resultPublishTitle.trim()) {
+      onError("请先填写题库标题。");
+      return;
+    }
+
+    setIsPublishingBeforeResult(true);
+    try {
+      await publishQuestionSetToCommunity({
+        questionSetId: resultPublishQuestionSet.id,
+        playerId,
+        title: resultPublishTitle.trim(),
+        description: resultPublishDescription.trim(),
+      });
+      setResultPublishQuestionSet(null);
+      setIsAdvancingQuestion(true);
+      await finishReviewedQuestion();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "发布到社区失败。");
+    } finally {
+      setIsPublishingBeforeResult(false);
       setIsAdvancingQuestion(false);
     }
   }
@@ -2700,6 +2767,58 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   {isSavingLabel ? "保存中..." : "保存标签"}
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {resultPublishQuestionSet ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
+          <div className="w-full max-w-xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
+            <div className="border-b border-[var(--line)] px-5 py-4">
+              <p className="text-lg font-semibold text-slate-950">发布到社区？</p>
+              <p className="mt-1 text-sm leading-6 text-[var(--muted)]">建议发布，好题库可以让更多房间直接开玩。</p>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-slate-950">题库标题</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={80}
+                  placeholder="必填"
+                  value={resultPublishTitle}
+                  onChange={(event) => setResultPublishTitle(event.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-slate-950">简介</span>
+                <input
+                  className="h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
+                  maxLength={160}
+                  placeholder="可留空"
+                  value={resultPublishDescription}
+                  onChange={(event) => setResultPublishDescription(event.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-col justify-end gap-2 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleSkipResultPublish}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion}
+              >
+                不发布，查看排行榜
+              </Button>
+              <Button
+                type="button"
+                onClick={handleConfirmResultPublish}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion || !resultPublishTitle.trim()}
+              >
+                {isPublishingBeforeResult ? "发布中..." : "发布并查看排行榜"}
+              </Button>
             </div>
           </div>
         </div>

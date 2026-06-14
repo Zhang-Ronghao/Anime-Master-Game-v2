@@ -1623,6 +1623,47 @@ export async function rateCommunityQuestionSet(params: {
   return toQuestionSet(updatedQuestionSet, questions);
 }
 
+export async function getQuestionSetRatingProgress(params: {
+  questionSetId: string;
+  playerIds: string[];
+  playerId?: string;
+}) {
+  assertD1Env();
+
+  const playerIds = Array.from(new Set(params.playerIds.filter((id) => typeof id === "string" && id.trim())));
+
+  if (playerIds.length === 0) {
+    return {
+      ratedCount: 0,
+      totalCount: 0,
+      ratedPlayerIds: [],
+      playerRating: null,
+    };
+  }
+
+  const { data: ratings, error } = await d1
+    .from("question_set_ratings")
+    .select("player_id,rating")
+    .eq("question_set_id", params.questionSetId)
+    .returns<{ player_id: string; rating: number }[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const playerIdSet = new Set(playerIds);
+  const roomRatings = (ratings ?? []).filter((rating) => playerIdSet.has(rating.player_id));
+  const ratedPlayerIds = roomRatings.map((rating) => rating.player_id);
+  const playerRating = roomRatings.find((rating) => rating.player_id === params.playerId)?.rating ?? null;
+
+  return {
+    ratedCount: ratedPlayerIds.length,
+    totalCount: playerIds.length,
+    ratedPlayerIds,
+    playerRating,
+  };
+}
+
 export async function getQuestionResultsForQuestion(params: {
   gameSessionId: string;
   questionIndex: number;
@@ -1634,6 +1675,22 @@ export async function getQuestionResultsForQuestion(params: {
     .select("*")
     .eq("game_session_id", params.gameSessionId)
     .eq("question_index", params.questionIndex)
+    .returns<DbQuestionResult[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map(toQuestionResult);
+}
+
+export async function getQuestionResultsForGameSession(gameSessionId: string) {
+  assertD1Env();
+
+  const { data, error } = await d1
+    .from("question_results")
+    .select("*")
+    .eq("game_session_id", gameSessionId)
     .returns<DbQuestionResult[]>();
 
   if (error) {

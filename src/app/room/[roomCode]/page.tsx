@@ -17,16 +17,17 @@ import {
   getLeaderboardForGameSession,
   getPlayersByRoomId,
   getQuestionSetById,
+  getQuestionResultsForGameSession,
+  getQuestionSetRatingProgress,
   getRoomByCode,
   joinRoom,
   leaveRoom,
-  publishQuestionSetToCommunity,
   rateCommunityQuestionSet,
   returnRoomToLobby,
   selectPresenterForRound,
   startGameWithQuestionSet,
 } from "@/lib/cloudflareRooms";
-import type { GameMode, GameSession, LeaderboardEntry, Player, QuestionSet, Room, RoomStatus, TeamBattleTeam } from "@/types/game";
+import type { GameMode, GameSession, LeaderboardEntry, Player, QuestionResult, QuestionSet, Room, RoomStatus, TeamBattleTeam } from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -139,11 +140,53 @@ function getTeamName(team: TeamBattleTeam) {
 function getTeamStyles(team: TeamBattleTeam) {
   return team === "red"
     ? {
-        panel: "border-red-200 bg-red-50",
+        panel: "bg-red-50/60",
+        badge: "bg-red-100 text-red-700 ring-red-200",
       }
     : {
-        panel: "border-sky-200 bg-sky-50",
+        panel: "bg-sky-50/70",
+        badge: "bg-sky-100 text-sky-700 ring-sky-200",
       };
+}
+
+function getResultRankStyles(rank: number) {
+  if (rank === 1) {
+    return {
+      row: "bg-rose-50/70",
+      badge: "bg-rose-600 text-white ring-rose-200",
+    };
+  }
+
+  if (rank === 2) {
+    return {
+      row: "bg-slate-50",
+      badge: "bg-slate-200 text-slate-800 ring-slate-300",
+    };
+  }
+
+  if (rank === 3) {
+    return {
+      row: "bg-amber-50/55",
+      badge: "bg-amber-100 text-amber-800 ring-amber-200",
+    };
+  }
+
+  return {
+    row: "",
+    badge: "bg-white text-slate-600 ring-[var(--line)]",
+  };
+}
+
+function getQuestionScoreClass(score: number, maxScore: number) {
+  if (score <= 0) {
+    return "bg-slate-50 text-slate-300 ring-slate-100";
+  }
+
+  if (score === maxScore) {
+    return "bg-emerald-50 text-emerald-700 ring-emerald-200";
+  }
+
+  return "bg-white text-slate-800 ring-slate-200";
 }
 
 function getRoomCodeFromLocation() {
@@ -565,12 +608,18 @@ function LobbyMainPanel({
   );
 }
 
+type RatingProgress = {
+  ratedCount: number;
+  totalCount: number;
+  ratedPlayerIds: string[];
+  playerRating: number | null;
+};
+
 function GameResultPanel({
   room,
   currentGameId,
   playerId,
   isHost,
-  isCurrentPresenter,
   isReturningToLobby,
   onReturnToLobby,
   onError,
@@ -579,7 +628,6 @@ function GameResultPanel({
   currentGameId?: string | null;
   playerId: string;
   isHost: boolean;
-  isCurrentPresenter: boolean;
   isReturningToLobby: boolean;
   onReturnToLobby: () => void;
   onError: (message: string) => void;
@@ -587,12 +635,26 @@ function GameResultPanel({
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [gameSession, setGameSession] = useState<GameSession | null>(null);
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
+  const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
+  const [ratingProgress, setRatingProgress] = useState<RatingProgress | null>(null);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
-  const [publishTitle, setPublishTitle] = useState("");
-  const [publishDescription, setPublishDescription] = useState("");
-  const [isPublishing, setIsPublishing] = useState(false);
   const [ratingValue, setRatingValue] = useState(5);
   const [isRating, setIsRating] = useState(false);
+
+  const playerIds = useMemo(() => room.players.map((player) => player.id), [room.players]);
+
+  async function loadRatingProgress(questionSetId: string) {
+    const nextProgress = await getQuestionSetRatingProgress({
+      questionSetId,
+      playerIds,
+      playerId,
+    });
+    setRatingProgress(nextProgress);
+
+    if (nextProgress.playerRating) {
+      setRatingValue(nextProgress.playerRating);
+    }
+  }
 
   useEffect(() => {
     let isMounted = true;
@@ -600,6 +662,10 @@ function GameResultPanel({
     async function loadLeaderboard() {
       if (!currentGameId) {
         setLeaderboard([]);
+        setGameSession(null);
+        setQuestionSet(null);
+        setQuestionResults([]);
+        setRatingProgress(null);
         return;
       }
 
@@ -610,13 +676,25 @@ function GameResultPanel({
           getGameSessionById(currentGameId),
         ]);
         const loadedQuestionSet = loadedGameSession ? await getQuestionSetById(loadedGameSession.questionSetId) : null;
+        const loadedQuestionResults = loadedGameSession ? await getQuestionResultsForGameSession(loadedGameSession.id) : [];
+        const nextRatingProgress =
+          loadedQuestionSet?.isPublic && loadedQuestionSet.id
+            ? await getQuestionSetRatingProgress({
+                questionSetId: loadedQuestionSet.id,
+                playerIds,
+                playerId,
+              })
+            : null;
 
         if (isMounted) {
           setLeaderboard(nextLeaderboard);
           setGameSession(loadedGameSession);
           setQuestionSet(loadedQuestionSet);
-          setPublishTitle(loadedQuestionSet?.title ?? "");
-          setPublishDescription(loadedQuestionSet?.description ?? "");
+          setQuestionResults(loadedQuestionResults);
+          setRatingProgress(nextRatingProgress);
+          if (nextRatingProgress?.playerRating) {
+            setRatingValue(nextRatingProgress.playerRating);
+          }
         }
       } catch (caughtError) {
         if (isMounted) {
@@ -634,7 +712,7 @@ function GameResultPanel({
     return () => {
       isMounted = false;
     };
-  }, [currentGameId, onError]);
+  }, [currentGameId, onError, playerId, playerIds]);
 
   useEffect(() => {
     if (!questionSet?.id) {
@@ -645,8 +723,11 @@ function GameResultPanel({
       const pushedQuestionSet = getBroadcastQuestionSet(message.result);
       if (pushedQuestionSet?.id === questionSet.id) {
         setQuestionSet(pushedQuestionSet);
-        setPublishTitle(pushedQuestionSet.title);
-        setPublishDescription(pushedQuestionSet.description ?? "");
+        if (pushedQuestionSet.isPublic) {
+          loadRatingProgress(pushedQuestionSet.id).catch((caughtError) => {
+            onError(caughtError instanceof Error ? caughtError.message : "刷新评分进度失败。");
+          });
+        }
         return;
       }
 
@@ -654,36 +735,16 @@ function GameResultPanel({
         .then((nextQuestionSet) => {
           if (nextQuestionSet) {
             setQuestionSet(nextQuestionSet);
-            setPublishTitle(nextQuestionSet.title);
-            setPublishDescription(nextQuestionSet.description ?? "");
+            if (nextQuestionSet.isPublic) {
+              return loadRatingProgress(nextQuestionSet.id);
+            }
           }
         })
         .catch((caughtError) => {
           onError(caughtError instanceof Error ? caughtError.message : "刷新题库状态失败。");
         });
     });
-  }, [onError, questionSet?.id]);
-
-  async function handlePublishQuestionSet() {
-    if (!questionSet) {
-      return;
-    }
-
-    setIsPublishing(true);
-    try {
-      const published = await publishQuestionSetToCommunity({
-        questionSetId: questionSet.id,
-        playerId,
-        title: publishTitle,
-        description: publishDescription,
-      });
-      setQuestionSet(published);
-    } catch (caughtError) {
-      onError(caughtError instanceof Error ? caughtError.message : "发布到社区失败。");
-    } finally {
-      setIsPublishing(false);
-    }
-  }
+  }, [onError, questionSet?.id, playerId, playerIds]);
 
   async function handleRateQuestionSet() {
     if (!questionSet) {
@@ -698,6 +759,7 @@ function GameResultPanel({
         rating: ratingValue,
       });
       setQuestionSet(rated);
+      await loadRatingProgress(rated.id);
     } catch (caughtError) {
       onError(caughtError instanceof Error ? caughtError.message : "评分失败。");
     } finally {
@@ -705,11 +767,31 @@ function GameResultPanel({
     }
   }
 
-  const canPublish = Boolean(questionSet && !questionSet.isPublic && questionSet.createdByPlayerId === playerId);
   const canRate = Boolean(questionSet?.isPublic);
   const presenterName = getPresenterName(room.players, room.currentPresenterPlayerId);
   const isTeamBattleResult = gameSession?.gameMode === "TEAM_BATTLE" && Boolean(gameSession.teamBattleState);
   const playerById = new Map(room.players.map((player) => [player.id, player]));
+  const questionCount = questionSet?.questions?.length ?? questionSet?.imageCount ?? 0;
+  const questionIndexes = Array.from({ length: questionCount }, (_, index) => index);
+  const scoreByPlayerQuestion = new Map<string, number>();
+  const scoreByTeamQuestion = new Map<string, number>();
+
+  for (const result of questionResults) {
+    const playerKey = `${result.playerId}:${result.questionIndex}`;
+    scoreByPlayerQuestion.set(playerKey, (scoreByPlayerQuestion.get(playerKey) ?? 0) + result.scoreAwarded);
+
+    if (gameSession?.teamBattleState && result.scoreAwarded > 0) {
+      const team = (["red", "blue"] as const).find((currentTeam) =>
+        gameSession.teamBattleState?.teams[currentTeam].includes(result.playerId),
+      );
+
+      if (team) {
+        const teamKey = `${team}:${result.questionIndex}`;
+        scoreByTeamQuestion.set(teamKey, Math.max(scoreByTeamQuestion.get(teamKey) ?? 0, result.scoreAwarded));
+      }
+    }
+  }
+
   const teamRows = gameSession?.teamBattleState
     ? (["red", "blue"] as const)
         .map((team) => ({
@@ -719,146 +801,237 @@ function GameResultPanel({
             id: memberId,
             nickname: playerById.get(memberId)?.nickname ?? memberId,
           })),
+          questionScores: questionIndexes.map((questionIndex) => scoreByTeamQuestion.get(`${team}:${questionIndex}`) ?? 0),
         }))
         .sort((a, b) => b.score - a.score || (a.team === "red" ? -1 : 1))
     : [];
+  const playerRows = leaderboard.map((entry) => ({
+    ...entry,
+    questionScores: questionIndexes.map((questionIndex) => scoreByPlayerQuestion.get(`${entry.playerId}:${questionIndex}`) ?? 0),
+  }));
+  const questionMaxScores = questionIndexes.map((_, questionIndex) => {
+    const scores = isTeamBattleResult
+      ? teamRows.map((row) => row.questionScores[questionIndex] ?? 0)
+      : playerRows.map((row) => row.questionScores[questionIndex] ?? 0);
+
+    return Math.max(0, ...scores);
+  });
+  const ratingPercent =
+    ratingProgress && ratingProgress.totalCount > 0 ? Math.round((ratingProgress.ratedCount / ratingProgress.totalCount) * 100) : 0;
+  const questionScoreColumnWidth = 56;
+  const teamLeaderboardWidth = 64 + 112 + 88 + 224 + questionCount * questionScoreColumnWidth;
+  const playerLeaderboardWidth = 64 + 176 + 88 + 72 + questionCount * questionScoreColumnWidth;
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-      <Panel title="最终排行榜">
+    <div className="space-y-5">
+      <Panel
+        title="本局排行榜"
+        action={<span className="text-sm font-medium text-[var(--muted)]">出题人：{presenterName}</span>}
+      >
         {isLoadingLeaderboard ? (
           <p className="text-sm text-[var(--muted)]">正在读取本局分数...</p>
         ) : isTeamBattleResult ? (
-          <div className="grid gap-3">
-            {teamRows.map((row, index) => {
-              const styles = getTeamStyles(row.team);
+          <div className="overflow-x-auto rounded-lg border border-[var(--line)] bg-white">
+            <table className="w-full table-fixed text-left text-sm" style={{ minWidth: `${teamLeaderboardWidth}px` }}>
+              <colgroup>
+                <col className="w-16" />
+                <col className="w-28" />
+                <col className="w-[88px]" />
+                <col className="w-56" />
+                {questionIndexes.map((questionIndex) => (
+                  <col className="w-14" key={questionIndex} />
+                ))}
+                <col />
+              </colgroup>
+              <thead className="border-b border-[var(--line)] bg-slate-50 text-xs font-semibold text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">排名</th>
+                  <th className="px-3 py-3">队伍</th>
+                  <th className="px-3 py-3 text-center">总分</th>
+                  <th className="px-3 py-3">成员</th>
+                  {questionIndexes.map((questionIndex) => (
+                    <th className="px-2 py-3 text-center" key={questionIndex}>
+                      Q{questionIndex + 1}
+                    </th>
+                  ))}
+                  <th aria-hidden="true" className="px-0 py-3" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--line)] text-slate-700">
+                {teamRows.map((row, index) => {
+                  const rank = index + 1;
+                  const styles = getTeamStyles(row.team);
+                  const rankStyles = getResultRankStyles(rank);
 
-              return (
-                <div className={["rounded-md border p-4", styles.panel].join(" ")} key={row.team}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[var(--muted)]">第 {index + 1} 名</p>
-                      <p className="mt-1 text-lg font-bold text-slate-950">{getTeamName(row.team)}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-2xl font-bold text-slate-950">{row.score}</p>
-                      <p className="text-xs text-[var(--muted)]">队伍总分</p>
-                    </div>
-                  </div>
-                  <div className="mt-3 grid gap-2">
-                    {row.members.map((member) => (
-                      <div className="rounded-md bg-white/80 px-3 py-2 text-sm" key={member.id}>
-                        <span className="min-w-0 truncate font-semibold text-slate-950">{member.nickname}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+                  return (
+                    <tr className={[rankStyles.row, index === 0 ? styles.panel : "", "transition hover:bg-slate-50"].join(" ")} key={row.team}>
+                      <td className="px-4 py-3">
+                        <span
+                          className={[
+                            "inline-grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-bold ring-1 ring-inset tabular-nums",
+                            rankStyles.badge,
+                          ].join(" ")}
+                        >
+                          {rank}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={["inline-flex rounded px-2 py-1 text-xs font-bold ring-1 ring-inset", styles.badge].join(" ")}>
+                          {getTeamName(row.team)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-center text-base font-bold tabular-nums text-slate-950">{row.score}</td>
+                      <td className="px-3 py-3">
+                        <span className="block truncate text-sm text-[var(--muted)]" title={row.members.map((member) => member.nickname).join("、")}>
+                          {row.members.map((member) => member.nickname).join("、")}
+                        </span>
+                      </td>
+                      {row.questionScores.map((score, questionIndex) => (
+                        <td className="px-2 py-3 text-center" key={questionIndex}>
+                          <span
+                            className={[
+                              "inline-grid h-7 min-w-7 place-items-center rounded px-1.5 text-xs font-bold ring-1 ring-inset tabular-nums",
+                              getQuestionScoreClass(score, questionMaxScores[questionIndex]),
+                            ].join(" ")}
+                          >
+                            {score}
+                          </span>
+                        </td>
+                      ))}
+                      <td aria-hidden="true" className="px-0 py-3" />
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         ) : leaderboard.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">本局没有玩家得分。</p>
         ) : (
-          <div className="overflow-hidden rounded-md border border-[var(--line)]">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-xs uppercase text-[var(--muted)]">
+          <div className="overflow-x-auto rounded-lg border border-[var(--line)] bg-white">
+            <table className="w-full table-fixed text-left text-sm" style={{ minWidth: `${playerLeaderboardWidth}px` }}>
+              <colgroup>
+                <col className="w-16" />
+                <col className="w-44" />
+                <col className="w-[88px]" />
+                <col className="w-[72px]" />
+                {questionIndexes.map((questionIndex) => (
+                  <col className="w-14" key={questionIndex} />
+                ))}
+                <col />
+              </colgroup>
+              <thead className="border-b border-[var(--line)] bg-slate-50 text-xs font-semibold text-slate-500">
                 <tr>
                   <th className="px-4 py-3">排名</th>
-                  <th className="px-4 py-3">玩家昵称</th>
-                  <th className="px-4 py-3">总分</th>
-                  <th className="px-4 py-3">答对题数</th>
+                  <th className="px-3 py-3">玩家</th>
+                  <th className="px-3 py-3 text-center">总分</th>
+                  <th className="px-3 py-3 text-center">答对</th>
+                  {questionIndexes.map((questionIndex) => (
+                    <th className="px-2 py-3 text-center" key={questionIndex}>
+                      Q{questionIndex + 1}
+                    </th>
+                  ))}
+                  <th aria-hidden="true" className="px-0 py-3" />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[var(--line)] bg-white">
-                {leaderboard.map((entry) => (
-                  <tr key={entry.playerId}>
-                    <td className="px-4 py-3 font-semibold text-slate-950">{entry.rank}</td>
-                    <td className="px-4 py-3">{entry.nickname}</td>
-                    <td className="px-4 py-3 font-semibold">{entry.score}</td>
-                    <td className="px-4 py-3">{entry.correctCount}</td>
-                  </tr>
-                ))}
+              <tbody className="divide-y divide-[var(--line)] text-slate-700">
+                {playerRows.map((entry) => {
+                  const rankStyles = getResultRankStyles(entry.rank);
+
+                  return (
+                    <tr className={[rankStyles.row, "transition hover:bg-slate-50"].join(" ")} key={entry.playerId}>
+                      <td className="px-4 py-3">
+                        <span
+                          className={[
+                            "inline-grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-bold ring-1 ring-inset tabular-nums",
+                            rankStyles.badge,
+                          ].join(" ")}
+                        >
+                          {entry.rank}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className="block truncate font-semibold text-slate-950" title={entry.nickname}>
+                          {entry.nickname}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-center text-base font-bold tabular-nums text-slate-950">{entry.score}</td>
+                      <td className="px-3 py-3 text-center font-medium tabular-nums">{entry.correctCount}</td>
+                      {entry.questionScores.map((score, questionIndex) => (
+                        <td className="px-2 py-3 text-center" key={questionIndex}>
+                          <span
+                            className={[
+                              "inline-grid h-7 min-w-7 place-items-center rounded px-1.5 text-xs font-bold ring-1 ring-inset tabular-nums",
+                              getQuestionScoreClass(score, questionMaxScores[questionIndex]),
+                            ].join(" ")}
+                          >
+                            {score}
+                          </span>
+                        </td>
+                      ))}
+                      <td aria-hidden="true" className="px-0 py-3" />
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </Panel>
 
-      <div className="space-y-5">
-        <Panel title="当前游戏状态">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-              <p className="text-sm text-[var(--muted)]">状态</p>
-              <p className="mt-2 text-xl font-semibold">{statusText[room.status]}</p>
-            </div>
-            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
-              <p className="text-sm text-[var(--muted)]">本局出题人</p>
-              <p className="mt-2 text-xl font-semibold">{presenterName}</p>
-            </div>
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Panel title="题库评分">
+          {canRate ? (
+            <>
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-bold text-slate-950">{Number(questionSet?.ratingAvg ?? 0).toFixed(1)}</p>
+                  <p className="mt-1 text-sm text-[var(--muted)]">{questionSet?.ratingCount ?? 0} 人评分</p>
+                </div>
+                <p className="text-sm font-semibold text-slate-950">
+                  {ratingProgress?.ratedCount ?? 0}/{ratingProgress?.totalCount ?? room.players.length} 已完成
+                </p>
+              </div>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${ratingPercent}%` }} />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <select
+                  className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
+                  value={ratingValue}
+                  onChange={(event) => setRatingValue(Number(event.target.value))}
+                >
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>
+                      {rating} 星
+                    </option>
+                  ))}
+                </select>
+                <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
+                  {isRating ? "提交中..." : ratingProgress?.playerRating ? "修改评分" : "提交评分"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm leading-6 text-[var(--muted)]">本局题库未发布到社区，暂不开放评分。</p>
+          )}
+        </Panel>
+
+        <Panel title="操作">
+          <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4">
+            <p className="text-sm font-semibold text-slate-950">{isHost ? "本局已结算" : "等待房主返回大厅"}</p>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              {isHost ? "确认大家看完排行榜后，可以回到大厅开始下一局。" : "房主返回大厅后即可开始下一局。"}
+            </p>
           </div>
-          <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
-          <p className="mt-4 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6 text-[var(--muted)]">
-            本局结算已生成，分数只统计当前 game_session。
-          </p>
           {isHost ? (
             <Button className="mt-4" type="button" onClick={onReturnToLobby} disabled={isReturningToLobby}>
               {isReturningToLobby ? "返回中..." : "回到房间大厅"}
             </Button>
           ) : (
-            <p className="mt-4 text-sm text-[var(--muted)]">等待房主回到房间大厅。</p>
+            <p className="mt-4 text-sm font-medium text-[var(--muted)]">等待房主操作。</p>
           )}
         </Panel>
-
-        {canPublish ? (
-          <Panel title="发布到社区">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-900">标题</span>
-                <input
-                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  value={publishTitle}
-                  onChange={(event) => setPublishTitle(event.target.value)}
-                />
-              </label>
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-900">简介</span>
-                <input
-                  className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
-                  value={publishDescription}
-                  onChange={(event) => setPublishDescription(event.target.value)}
-                />
-              </label>
-            </div>
-            <Button className="mt-4" type="button" onClick={handlePublishQuestionSet} disabled={isPublishing}>
-              {isPublishing ? "发布中..." : "发布到社区"}
-            </Button>
-          </Panel>
-        ) : null}
-
-        {canRate ? (
-          <Panel title="社区评分">
-            <p className="text-sm text-[var(--muted)]">
-              所有玩家都可以评分；同一玩家重复评分会更新自己的上一次评分。当前评分：
-              {Number(questionSet?.ratingAvg ?? 0).toFixed(2)} / 5，{questionSet?.ratingCount ?? 0} 人评分。
-            </p>
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <select
-                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm"
-                value={ratingValue}
-                onChange={(event) => setRatingValue(Number(event.target.value))}
-              >
-                {[1, 2, 3, 4, 5].map((rating) => (
-                  <option key={rating} value={rating}>
-                    {rating} 星
-                  </option>
-                ))}
-              </select>
-              <Button type="button" onClick={handleRateQuestionSet} disabled={isRating}>
-                {isRating ? "评分中..." : "提交评分"}
-              </Button>
-            </div>
-          </Panel>
-        ) : null}
       </div>
     </div>
   );
@@ -1282,28 +1455,17 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           />
         </div>
       ) : shouldShowQuestionSetup ? (
-        <div className="grid items-stretch gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="h-full">
-            <PlayerList
-              players={room.players}
-              playerId={playerId}
-              presenterPlayerId={room.currentPresenterPlayerId}
-              gameMode={gameSettings.gameMode}
-            />
-          </aside>
+        <div className="mx-auto max-w-5xl">
           <Panel title="准备题库">
-            <StepGuide room={room} isHost={isHost} isCurrentPresenter={isCurrentPresenter} />
-            <div className="mt-5 rounded-md border border-[var(--line)] bg-white p-4 text-sm leading-6">
-              <QuestionSetUploader
-                room={room}
-                presenterPlayerId={playerId}
-                onRoomUpdated={(nextRoom) =>
-                  setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
-                }
-                onError={setError}
-                onClearError={() => setError("")}
-              />
-            </div>
+            <QuestionSetUploader
+              room={room}
+              presenterPlayerId={playerId}
+              onRoomUpdated={(nextRoom) =>
+                setRoom((currentRoom) => (currentRoom ? { ...nextRoom, players: currentRoom.players } : nextRoom))
+              }
+              onError={setError}
+              onClearError={() => setError("")}
+            />
           </Panel>
         </div>
       ) : room.status === "GAME_RESULT" ? (
@@ -1312,7 +1474,6 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
           currentGameId={room.currentGameId}
           playerId={playerId}
           isHost={isHost}
-          isCurrentPresenter={isCurrentPresenter}
           isReturningToLobby={isReturningToLobby}
           onReturnToLobby={handleReturnToLobby}
           onError={setError}
