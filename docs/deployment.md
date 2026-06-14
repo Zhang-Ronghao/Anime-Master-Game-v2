@@ -83,10 +83,10 @@ npm run build
 1. 创建 D1。
 2. 填 `wrangler.toml`。
 3. 执行远程 D1 迁移。
-4. 连接 GitHub 自动部署 Worker。
-5. 配置 Worker secrets。
+4. 部署 Worker：本地手动部署或 Git 连接部署二选一。
+5. 写入 Worker secrets。
 6. 连接 GitHub 自动部署 Pages。
-7. 回填真实 `ALLOWED_ORIGIN`，再次 push 触发 Worker 自动部署。
+7. 回填真实 `ALLOWED_ORIGIN`，按你的 Worker 部署方式更新 Worker。
 8. 如果有自定义域名，再配置同源 `/api/*`。
 
 ### 1. 创建 D1
@@ -131,14 +131,39 @@ npm run d1:migrate:remote
 
 ### 2. 部署 Worker
 
-先本地检查：
+先检查 Worker：
 
 ```bash
 npm run worker:typecheck
 npx wrangler deploy --dry-run
 ```
 
-确认通过后，把代码和 `wrangler.toml` push 到 GitHub。
+#### 方式 A：本地手动部署
+
+部署 Worker：
+
+```bash
+npm run worker:deploy
+```
+
+部署成功后，记下 Worker 地址：
+
+```text
+https://anime-master-game-api.<your-name>.workers.dev
+```
+
+写入 Worker secrets：
+
+```bash
+npx wrangler secret put CLOUDINARY_API_KEY
+npx wrangler secret put CLOUDINARY_API_SECRET
+```
+
+终端提示输入值时，分别填 Cloudinary API key 和 API secret。不要把这两个值写进 `wrangler.toml`，也不要配到 Pages。
+
+#### 方式 B：Git 连接部署
+
+把代码和 `wrangler.toml` push 到 GitHub。
 
 在 Cloudflare 创建 Worker：
 
@@ -150,10 +175,15 @@ Account home -> Add -> Workers
 
 ```text
 Project name: anime-master-game-api
-Production branch: main
 Root directory: 项目根目录
 Build command: 留空
 Deploy command: npx wrangler deploy
+```
+
+如果页面可以选择 production branch，就选 `main` 或你的实际生产分支。如果创建页面没有分支选项，先继续创建，部署后到这里确认或调整：
+
+```text
+Workers & Pages -> 你的 Worker -> Settings -> Builds
 ```
 
 Worker 名称要和 `wrangler.toml` 一致：
@@ -168,7 +198,7 @@ name = "anime-master-game-api"
 https://anime-master-game-api.<your-name>.workers.dev
 ```
 
-配置 Worker secrets：
+配置 Worker runtime secrets：
 
 ```text
 Workers & Pages -> 你的 Worker -> Settings -> Variables & Secrets
@@ -182,6 +212,8 @@ CLOUDINARY_API_SECRET
 ```
 
 这两个是 Worker runtime secrets，不要写进 `wrangler.toml`，也不要配到 Pages。
+
+如果 Git 连接部署误识别成 Next.js，见常见问题。
 
 ### 3. 部署 Pages
 
@@ -241,7 +273,15 @@ ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
 错误：https://anime-master-game-v2.pages.dev/
 ```
 
-提交并 push，Cloudflare Workers Builds 会自动重新部署 Worker。
+然后更新 Worker：
+
+```bash
+# 本地手动部署：
+npm run worker:deploy
+
+# Git 连接部署：
+git push
+```
 
 ### 5. 自定义域名同源 `/api/*`
 
@@ -288,7 +328,15 @@ NEXT_PUBLIC_API_BASE_URL=
 ALLOWED_ORIGIN = "https://game.example.com"
 ```
 
-提交并 push，等待 Workers Builds 部署完成。
+然后更新 Worker：
+
+```bash
+# 本地手动部署：
+npm run worker:deploy
+
+# Git 连接部署：
+git push
+```
 
 ## 更新部署
 
@@ -303,22 +351,29 @@ Cloudflare Pages 会自动构建和部署。
 只改 Worker 或 `wrangler.toml`：
 
 ```bash
+# 本地手动部署：
+npm run worker:deploy
+
+# Git 连接部署：
 git push
 ```
-
-Cloudflare Workers Builds 会自动执行 `npx wrangler deploy`。
 
 改了 D1 迁移：
 
 ```bash
 npm run d1:migrate:remote
+
+# 本地手动部署：
+npm run worker:deploy
+
+# Git 连接部署：
 git push
 ```
 
 前后端都改了：
 
-- 如果接口兼容，直接 `git push`。
-- 如果新前端依赖新后端，先发布后端兼容改动，等 Worker 部署完成后，再发布前端改动。
+- 如果接口兼容，更新 Worker，并 push 前端。
+- 如果新前端依赖新后端，先更新 Worker，确认 Worker 部署完成后，再 push 前端。
 
 改了 Pages 环境变量：
 
@@ -328,11 +383,18 @@ Pages -> Deployments -> 重新运行最近一次 Git deployment
 
 改了 Worker secrets：
 
+本地手动部署：
+
+```bash
+npx wrangler secret put CLOUDINARY_API_KEY
+npx wrangler secret put CLOUDINARY_API_SECRET
+```
+
+Git 连接部署：
+
 ```text
 Worker -> Settings -> Variables & Secrets
 ```
-
-更新 secret 后，如果没有代码提交，在 Worker 的 `Deployments` 或 `Builds` 页面重新运行最近一次 Git deployment。
 
 ## 常见问题
 
@@ -390,7 +452,38 @@ ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
 - 不要填 `localhost`。
 - 不要填 Pages 地址。
 
-改完后等待对应的 Git deployment 成功。
+改完 Worker 配置后执行：
+
+```bash
+# 本地手动部署：
+npm run worker:deploy
+
+# Git 连接部署：
+git push
+```
+
+改完 Pages 环境变量后，在 Pages 的 `Deployments` 里重新运行最近一次 Git deployment。
+
+### Worker Git 连接部署误识别成 Next.js
+
+如果日志里出现：
+
+```text
+Framework: Next.js
+Output Directory: .next
+The version of Next.js used in the project cannot be automatically configured
+```
+
+说明 Cloudflare 把 Worker 部署识别成了 Next.js framework 项目。Worker 应该改成：
+
+```text
+Framework preset: None / No preset
+Build command: 留空
+Deploy command: npx wrangler deploy
+Root directory: 项目根目录
+```
+
+如果 UI 不允许修改，删掉这个错误创建的 Worker Git 部署，重新创建时不要选择 Next.js/framework 模板。
 
 ### 线上提示数据库表不存在
 
