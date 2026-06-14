@@ -14,6 +14,7 @@ import type {
   DbRoom,
   GameSession,
   GameMode,
+  GameBootstrapSnapshot,
   LeaderboardEntry,
   Player,
   PlayerScore,
@@ -714,11 +715,12 @@ export async function leaveRoom(roomId: string, playerId: string) {
     throw new Error(deleteError.message);
   }
 
+  const remainingPlayers = await getDbPlayersByRoomId(roomId);
+
   if (!isLeavingHost && !(isLeavingPresenter && room.game_status === "QUESTION_SETUP")) {
-    return null;
+    return toRoom(room, remainingPlayers);
   }
 
-  const remainingPlayers = await getDbPlayersByRoomId(roomId);
   const currentHostStillPresent = remainingPlayers.some((player) => player.id === room.host_player_id);
   const shouldPromoteHost = isLeavingHost || !currentHostStillPresent;
   const nextHost = shouldPromoteHost
@@ -1545,6 +1547,27 @@ export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnap
     labelAnswers: (questionAnswers ?? []).map(toAnswer),
     buzzerAnswers: (currentRoundBuzzerAnswers ?? []).map(toBuzzerAnswer),
     labelBuzzerAnswers: (questionBuzzerAnswers ?? []).map(toBuzzerAnswer),
+  };
+}
+
+export async function getGameBootstrapSnapshot(gameSessionId: string): Promise<GameBootstrapSnapshot> {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(gameSessionId);
+
+  if (!gameSession) {
+    throw new Error("加载游戏快照失败：当前游戏不存在。");
+  }
+
+  const [questions, roundSnapshot] = await Promise.all([
+    getQuestionsByQuestionSetId(gameSession.questionSetId),
+    getRoundSnapshot(gameSession.id),
+  ]);
+
+  return {
+    gameSession,
+    questions,
+    roundSnapshot,
   };
 }
 

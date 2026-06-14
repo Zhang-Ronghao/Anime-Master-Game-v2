@@ -167,6 +167,68 @@ export type RoundSnapshot = {
   labelBuzzerAnswers: BuzzerAnswer[];
 };
 
+export type GameBootstrapSnapshot = {
+  gameSession: GameSession;
+  questions: Question[];
+  roundSnapshot: RoundSnapshot;
+};
+
+export type RealtimeDelta =
+  | {
+      scope: "room";
+      type: "room_updated";
+      room: Room;
+    }
+  | {
+      scope: "room";
+      type: "room_dissolved";
+      roomId: string;
+    }
+  | {
+      scope: "game";
+      type: "game_session_updated";
+      gameSession: GameSession;
+    }
+  | {
+      scope: "game";
+      type: "round_snapshot";
+      snapshot: RoundSnapshot;
+    }
+  | {
+      scope: "game";
+      type: "answer_submitted";
+      answer: Answer;
+    }
+  | {
+      scope: "game";
+      type: "answer_canceled";
+      gameSession: GameSession;
+      canceledAnswerId: string;
+    }
+  | {
+      scope: "game";
+      type: "buzzer_answer_submitted";
+      buzzerAnswer: BuzzerAnswer;
+    }
+  | {
+      scope: "game";
+      type: "buzzer_answer_judged";
+      gameSession: GameSession;
+      buzzerAnswer: BuzzerAnswer;
+    }
+  | {
+      scope: "game";
+      type: "question_label_updated";
+      question: Question;
+    }
+  | {
+      scope: "question-set";
+      type: "question_set_updated";
+      questionSet: QuestionSet;
+      ratedPlayerId?: string;
+      rating?: number;
+    };
+
 export type DbQuestionSet = {
   id: string;
   title: string;

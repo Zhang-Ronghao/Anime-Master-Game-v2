@@ -1,14 +1,17 @@
 ﻿"use client";
 
 import type { RoundSnapshot } from "@/types/game";
+import type { RealtimeDelta } from "@/types/game";
 
 type ChangeMessage = {
   type: "change";
   name: string;
   result: unknown;
   args: unknown[];
-  topics: string[];
+  topic: string;
   clientActionId?: string;
+  delta?: RealtimeDelta;
+  deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
 };
 
@@ -28,6 +31,7 @@ type TopicState = {
 
 const ACTION_TIMEOUT_MS = 4000;
 const RECONNECT_DELAY_MS = 500;
+const ROOM_TOPIC_PREFIX = "room:";
 
 const MUTATION_NAMES = new Set([
   "leaveRoom",
@@ -81,32 +85,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function addTopic(topics: Set<string>, prefix: string, value: unknown) {
-  if (typeof value === "string" && value.trim()) {
-    topics.add(`${prefix}:${value}`);
-  }
-}
-
 function inferActionTopic(name: string, args: unknown[]) {
-  const topics = new Set<string>();
   const first = args[0];
 
-  if (typeof first === "string") {
-    if (name.includes("Room") || name.includes("Presenter") || name.includes("Round")) {
-      addTopic(topics, "room", first);
-    }
-    if (name.includes("GameSession")) {
-      addTopic(topics, "game", first);
+  if (typeof first === "string" && (name.includes("Room") || name.includes("Presenter") || name.includes("Round"))) {
+    const roomTopic = `${ROOM_TOPIC_PREFIX}${first}`;
+    if (topicStates.has(roomTopic)) {
+      return roomTopic;
     }
   }
 
   if (isRecord(first)) {
-    addTopic(topics, "room", first.roomId);
-    addTopic(topics, "game", first.gameSessionId);
-    addTopic(topics, "question-set", first.questionSetId);
+    if (typeof first.roomId === "string" && first.roomId.trim()) {
+      const roomTopic = `${ROOM_TOPIC_PREFIX}${first.roomId}`;
+      if (topicStates.has(roomTopic)) {
+        return roomTopic;
+      }
+    }
   }
 
-  return Array.from(topics).find((topic) => topicStates.get(topic)?.socket?.readyState === WebSocket.OPEN) ?? null;
+  return Array.from(topicStates.keys()).find((topic) => topic.startsWith(ROOM_TOPIC_PREFIX)) ?? null;
 }
 
 function getTopicState(topic: string) {
@@ -188,6 +186,40 @@ function ensureSocket(topic: string) {
   return socket;
 }
 
+function waitForSocketOpen(topic: string, socket: WebSocket) {
+  if (socket.readyState === WebSocket.OPEN) {
+    return Promise.resolve(socket);
+  }
+
+  if (socket.readyState !== WebSocket.CONNECTING) {
+    return Promise.reject(new Error("实时连接不可用，请稍后重试。"));
+  }
+
+  return new Promise<WebSocket>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      socket.removeEventListener("open", handleOpen);
+      socket.removeEventListener("close", handleClose);
+      reject(new Error("实时连接未就绪，请稍后重试。"));
+    }, ACTION_TIMEOUT_MS);
+
+    function handleOpen() {
+      window.clearTimeout(timer);
+      socket.removeEventListener("close", handleClose);
+      resolve(socket);
+    }
+
+    function handleClose() {
+      window.clearTimeout(timer);
+      socket.removeEventListener("open", handleOpen);
+      reject(new Error("实时连接已断开，请重试。"));
+    }
+
+    socket.addEventListener("open", handleOpen, { once: true });
+    socket.addEventListener("close", handleClose, { once: true });
+    ensureSocket(topic);
+  });
+}
+
 async function httpRpc<T>(name: string, args: unknown[]) {
   const response = await fetch(apiUrl("/api/rpc"), {
     method: "POST",
@@ -201,13 +233,9 @@ async function httpRpc<T>(name: string, args: unknown[]) {
   return payload.data as T;
 }
 
-function wsAction<T>(topic: string, name: string, args: unknown[]) {
+async function wsAction<T>(topic: string, name: string, args: unknown[]) {
   const state = getTopicState(topic);
-  const socket = ensureSocket(topic);
-
-  if (socket.readyState !== WebSocket.OPEN) {
-    return null;
-  }
+  const socket = await waitForSocketOpen(topic, ensureSocket(topic));
 
   const clientActionId =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -235,10 +263,7 @@ export async function callGameRpc<T>(name: string, args: unknown[] = []) {
   if (MUTATION_NAMES.has(name)) {
     const topic = inferActionTopic(name, args);
     if (topic) {
-      const result = wsAction<T>(topic, name, args);
-      if (result) {
-        return await result;
-      }
+      return await wsAction<T>(topic, name, args);
     }
   }
 

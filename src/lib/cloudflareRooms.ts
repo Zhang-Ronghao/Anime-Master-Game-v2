@@ -5,6 +5,7 @@ import type {
   Answer,
   BuzzerAnswer,
   DbRoom,
+  GameBootstrapSnapshot,
   GameMode,
   GameSession,
   LeaderboardEntry,
@@ -228,6 +229,9 @@ export const getBuzzerAnswerForPlayerRound = (params: {
 }) => rpc<BuzzerAnswer | null>("getBuzzerAnswerForPlayerRound", params);
 
 export const getRoundSnapshot = (gameSessionId: string) => rpc<RoundSnapshot>("getRoundSnapshot", gameSessionId);
+
+export const getGameBootstrapSnapshot = (gameSessionId: string) =>
+  rpc<GameBootstrapSnapshot>("getGameBootstrapSnapshot", gameSessionId);
 
 export const getPlayerScores = (gameSessionId: string) => rpc<PlayerScore[]>("getPlayerScores", gameSessionId);
 

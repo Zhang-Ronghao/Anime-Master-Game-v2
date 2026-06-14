@@ -1,6 +1,6 @@
 ﻿import * as gameService from "./gameService";
 
-import type { RoundSnapshot } from "../src/types/game";
+import type { Answer, BuzzerAnswer, GameSession, Question, QuestionSet, RealtimeDelta, Room, RoundSnapshot } from "../src/types/game";
 
 export interface Env {
   DB: D1Database;
@@ -26,8 +26,10 @@ type BroadcastMessage = {
   name: string;
   result: unknown;
   args: unknown[];
-  topics: string[];
+  topic: string;
   clientActionId?: string;
+  delta?: RealtimeDelta;
+  deltas?: RealtimeDelta[];
   roundSnapshot?: RoundSnapshot;
 };
 
@@ -74,17 +76,10 @@ const MUTATION_NAMES = new Set([
   "returnRoomToLobby",
 ]);
 
-const ROUND_SNAPSHOT_MUTATION_NAMES = new Set([
+const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
-  "confirmRevealBlocks",
-  "submitAnswer",
-  "submitForfeitAnswer",
-  "cancelForfeitAnswer",
   "judgeBuzzerAnswer",
   "settleBuzzerRound",
-  "submitTeamBattleRevealVote",
-  "submitTeamBattleGuessVote",
-  "finalizeTeamBattleVote",
   "judgeTeamBattleGuess",
   "revealTeamBattleAnswer",
   "gradeAnswersAndAdvance",
@@ -179,56 +174,6 @@ function isGameSessionRecord(value: Record<string, unknown>) {
   return typeof value.id === "string" && typeof value.roomId === "string" && "currentQuestionIndex" in value;
 }
 
-function addTopic(topics: Set<string>, prefix: string, value: unknown) {
-  if (typeof value === "string" && value.trim()) {
-    topics.add(`${prefix}:${value}`);
-  }
-}
-
-function deriveTopics(name: string, args: unknown[], result: unknown) {
-  const topics = new Set<string>();
-  const first = args[0];
-
-  if (typeof first === "string") {
-    if (name.includes("Room") || name.includes("Presenter") || name.includes("Round")) {
-      addTopic(topics, "room", first);
-    }
-    if (name.includes("GameSession")) {
-      addTopic(topics, "game", first);
-    }
-  }
-
-  if (isRecord(first)) {
-    addTopic(topics, "room", first.roomId);
-    addTopic(topics, "game", first.gameSessionId);
-    addTopic(topics, "question-set", first.questionSetId);
-  }
-
-  if (isRecord(result)) {
-    const room = result.room;
-    const gameSession = result.gameSession;
-    if (isRecord(room)) {
-      addTopic(topics, "room", room.id);
-      addTopic(topics, "room-code", room.code);
-      addTopic(topics, "game", room.currentGameId);
-    }
-    if (isRecord(gameSession)) {
-      addTopic(topics, "game", gameSession.id);
-      addTopic(topics, "question-set", gameSession.questionSetId);
-    }
-    if (!isGameSessionRecord(result)) {
-      addTopic(topics, "question-set", result.questionSetId);
-    }
-    addTopic(topics, "game", result.gameSessionId);
-  }
-
-  if (name === "joinRoom" && typeof first === "string") {
-    addTopic(topics, "room-code", first.toUpperCase());
-  }
-
-  return Array.from(topics);
-}
-
 function getResultGameSessionId(result: unknown) {
   if (!isRecord(result)) {
     return null;
@@ -251,7 +196,7 @@ function getResultGameSessionId(result: unknown) {
 }
 
 async function getRoundSnapshotForMutation(name: string, result: unknown) {
-  if (!ROUND_SNAPSHOT_MUTATION_NAMES.has(name)) {
+  if (!COMPACT_SNAPSHOT_MUTATION_NAMES.has(name)) {
     return null;
   }
 
@@ -274,15 +219,163 @@ function attachRoundSnapshot(result: unknown, roundSnapshot: RoundSnapshot | nul
   };
 }
 
+function asRoom(value: unknown): Room | null {
+  return isRecord(value) && typeof value.code === "string" && typeof value.status === "string" ? (value as Room) : null;
+}
+
+function asGameSession(value: unknown): GameSession | null {
+  return isRecord(value) && isGameSessionRecord(value) ? (value as GameSession) : null;
+}
+
+function asAnswer(value: unknown): Answer | null {
+  return isRecord(value) && typeof value.id === "string" && typeof value.gameSessionId === "string" && "answerText" in value && "submittedAt" in value
+    ? (value as Answer)
+    : null;
+}
+
+function asBuzzerAnswer(value: unknown): BuzzerAnswer | null {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.gameSessionId === "string" &&
+    "answerText" in value &&
+    "submittedAt" in value &&
+    typeof value.status === "string" &&
+    "scoreAwarded" in value
+    ? (value as BuzzerAnswer)
+    : null;
+}
+
+function asQuestion(value: unknown): Question | null {
+  return isRecord(value) && typeof value.id === "string" && typeof value.questionSetId === "string" && "orderIndex" in value
+    ? (value as Question)
+    : null;
+}
+
+function asQuestionSet(value: unknown): QuestionSet | null {
+  return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && "imageCount" in value
+    ? (value as QuestionSet)
+    : null;
+}
+
+function getResultRoom(result: unknown) {
+  if (isRecord(result)) {
+    return asRoom(result.room) ?? asRoom(result);
+  }
+  return null;
+}
+
+function getResultGameSession(result: unknown) {
+  if (isRecord(result)) {
+    return asGameSession(result.gameSession) ?? asGameSession(result);
+  }
+  return null;
+}
+
+function getResultQuestionSet(result: unknown) {
+  if (isRecord(result)) {
+    return asQuestionSet(result.questionSet) ?? asQuestionSet(result);
+  }
+  return null;
+}
+
+function getArgRecord(args: unknown[]) {
+  return isRecord(args[0]) ? args[0] : null;
+}
+
+function buildRealtimeDeltas(name: string, args: unknown[], result: unknown, roundSnapshot: RoundSnapshot | null): RealtimeDelta[] {
+  const deltas: RealtimeDelta[] = [];
+  const room = getResultRoom(result);
+  const gameSession = getResultGameSession(result);
+  const questionSet = getResultQuestionSet(result);
+  const question = asQuestion(result);
+  const buzzerAnswer = asBuzzerAnswer(result);
+  const answer = buzzerAnswer ? null : asAnswer(result);
+  const argRecord = getArgRecord(args);
+
+  if (name === "dissolveRoom" && typeof args[0] === "string") {
+    deltas.push({ scope: "room", type: "room_dissolved", roomId: args[0] });
+  }
+
+  if (room?.id) {
+    deltas.push({ scope: "room", type: "room_updated", room });
+  }
+
+  if (questionSet) {
+    deltas.push({
+      scope: "question-set",
+      type: "question_set_updated",
+      questionSet,
+      ratedPlayerId: typeof argRecord?.playerId === "string" ? argRecord.playerId : undefined,
+      rating: typeof argRecord?.rating === "number" ? argRecord.rating : undefined,
+    });
+  }
+
+  if (question) {
+    deltas.push({ scope: "game", type: "question_label_updated", question });
+  }
+
+  if (name === "cancelForfeitAnswer" && isRecord(result) && gameSession && typeof result.canceledAnswerId === "string") {
+    deltas.push({
+      scope: "game",
+      type: "answer_canceled",
+      gameSession,
+      canceledAnswerId: result.canceledAnswerId,
+    });
+  } else if (answer) {
+    deltas.push({ scope: "game", type: "answer_submitted", answer });
+  }
+
+  const judgedBuzzerAnswer = isRecord(result) ? asBuzzerAnswer(result.judgedAnswer) : null;
+  if (judgedBuzzerAnswer && gameSession) {
+    deltas.push({ scope: "game", type: "buzzer_answer_judged", gameSession, buzzerAnswer: judgedBuzzerAnswer });
+  } else if (buzzerAnswer) {
+    deltas.push({ scope: "game", type: "buzzer_answer_submitted", buzzerAnswer });
+  }
+
+  if (roundSnapshot) {
+    deltas.push({ scope: "game", type: "round_snapshot", snapshot: roundSnapshot });
+  } else if (gameSession && name !== "cancelForfeitAnswer") {
+    deltas.push({ scope: "game", type: "game_session_updated", gameSession });
+  }
+
+  return deltas;
+}
+
+async function getRoomTopicForBroadcast(name: string, args: unknown[], result: unknown) {
+  const resultRoom = getResultRoom(result);
+  if (resultRoom?.id) {
+    return `room:${resultRoom.id}`;
+  }
+
+  const resultGameSession = getResultGameSession(result);
+  if (resultGameSession?.roomId) {
+    return `room:${resultGameSession.roomId}`;
+  }
+
+  const first = args[0];
+  if (typeof first === "string" && (name.includes("Room") || name.includes("Presenter") || name.includes("Round"))) {
+    return `room:${first}`;
+  }
+
+  if (isRecord(first)) {
+    if (typeof first.roomId === "string" && first.roomId.trim()) {
+      return `room:${first.roomId}`;
+    }
+
+    if (typeof first.gameSessionId === "string" && first.gameSessionId.trim()) {
+      const gameSession = await gameService.getGameSessionById(first.gameSessionId);
+      return gameSession?.roomId ? `room:${gameSession.roomId}` : null;
+    }
+  }
+
+  return null;
+}
+
 async function broadcast(env: Env, message: BroadcastMessage) {
-  await Promise.all(
-    message.topics.map((topic) =>
-      getRoomObject(env, topic).fetch("https://room-object/broadcast", {
-        method: "POST",
-        body: JSON.stringify(message),
-      }),
-    ),
-  );
+  await getRoomObject(env, message.topic).fetch("https://room-object/broadcast", {
+    method: "POST",
+    body: JSON.stringify(message),
+  });
 }
 
 async function handleRpc(request: Request, env: Env) {
@@ -294,15 +387,18 @@ async function handleRpc(request: Request, env: Env) {
   const responseResult = attachRoundSnapshot(result, roundSnapshot);
 
   if (MUTATION_NAMES.has(name)) {
-    const topics = deriveTopics(name, args, responseResult);
-    if (topics.length > 0) {
+    const topic = await getRoomTopicForBroadcast(name, args, responseResult);
+    if (topic) {
+      const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
       await broadcast(env, {
         type: "change",
         name,
         result: responseResult,
         args,
-        topics,
+        topic,
         clientActionId: body.clientActionId,
+        delta: deltas[0],
+        deltas,
         roundSnapshot: roundSnapshot ?? undefined,
       });
     }
@@ -365,6 +461,7 @@ async function handleCloudinaryImages(request: Request, env: Env) {
 
 export class RoomDurableObject {
   private readonly recentActions = new Map<string, { expiresAt: number; result: unknown }>();
+  private actionQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
@@ -389,6 +486,15 @@ export class RoomDurableObject {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const task = this.actionQueue.then(
+      () => this.handleWebSocketAction(socket, message),
+      () => this.handleWebSocketAction(socket, message),
+    );
+    this.actionQueue = task.catch(() => undefined);
+    await task;
+  }
+
+  private async handleWebSocketAction(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     let clientActionId: string | undefined;
     try {
       const payload = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)) as {
@@ -418,17 +524,21 @@ export class RoomDurableObject {
         this.recentActions.set(actionKey, { expiresAt: Date.now() + ACTION_RESULT_TTL_MS, result: responseResult });
       }
 
-      const topics = deriveTopics(payload.name, payload.args ?? [], responseResult);
-      if (topics.length > 0) {
-        await broadcast(this.env, {
+      if (MUTATION_NAMES.has(payload.name)) {
+        const deltas = buildRealtimeDeltas(payload.name, payload.args ?? [], responseResult, roundSnapshot);
+        this.broadcast(
+          JSON.stringify({
           type: "change",
           name: payload.name,
           result: responseResult,
           args: payload.args ?? [],
-          topics,
+            topic: "",
           clientActionId: payload.clientActionId,
+            delta: deltas[0],
+            deltas,
           roundSnapshot: roundSnapshot ?? undefined,
-        });
+          } satisfies BroadcastMessage),
+        );
       }
 
       socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult }));

@@ -15,11 +15,9 @@ import {
   dissolveRoom,
   getGameSessionById,
   getLeaderboardForGameSession,
-  getPlayersByRoomId,
   getQuestionSetById,
   getQuestionResultsForGameSession,
   getQuestionSetRatingProgress,
-  getRoomByCode,
   joinRoom,
   leaveRoom,
   rateCommunityQuestionSet,
@@ -27,7 +25,18 @@ import {
   selectPresenterForRound,
   startGameWithQuestionSet,
 } from "@/lib/cloudflareRooms";
-import type { GameMode, GameSession, LeaderboardEntry, Player, QuestionResult, QuestionSet, Room, RoomStatus, TeamBattleTeam } from "@/types/game";
+import type {
+  GameMode,
+  GameSession,
+  LeaderboardEntry,
+  Player,
+  QuestionResult,
+  QuestionSet,
+  RealtimeDelta,
+  Room,
+  RoomStatus,
+  TeamBattleTeam,
+} from "@/types/game";
 
 const statusText: Record<RoomStatus, string> = {
   LOBBY: "房间大厅",
@@ -147,6 +156,24 @@ function getTeamStyles(team: TeamBattleTeam) {
         panel: "bg-sky-50/70",
         badge: "bg-sky-100 text-sky-700 ring-sky-200",
       };
+}
+
+function getRealtimeDeltas(message: { delta?: RealtimeDelta; deltas?: RealtimeDelta[] }) {
+  return message.deltas ?? (message.delta ? [message.delta] : []);
+}
+
+function isQuestionSetUpdatedDelta(
+  delta: RealtimeDelta,
+): delta is Extract<RealtimeDelta, { scope: "question-set"; type: "question_set_updated" }> {
+  return delta.scope === "question-set" && delta.type === "question_set_updated";
+}
+
+function isRoomUpdatedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDelta, { scope: "room"; type: "room_updated" }> {
+  return delta.scope === "room" && delta.type === "room_updated";
+}
+
+function isRoomDissolvedDelta(delta: RealtimeDelta): delta is Extract<RealtimeDelta, { scope: "room"; type: "room_dissolved" }> {
+  return delta.scope === "room" && delta.type === "room_dissolved";
 }
 
 function getResultRankStyles(rank: number) {
@@ -715,36 +742,44 @@ function GameResultPanel({
   }, [currentGameId, onError, playerId, playerIds]);
 
   useEffect(() => {
-    if (!questionSet?.id) {
+    if (!room.id || !questionSet?.id) {
       return;
     }
 
-    return subscribeRealtimeTopic(`question-set:${questionSet.id}`, (message) => {
-      const pushedQuestionSet = getBroadcastQuestionSet(message.result);
+    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
+      const questionSetDelta = getRealtimeDeltas(message).find(
+        (delta): delta is Extract<RealtimeDelta, { scope: "question-set"; type: "question_set_updated" }> =>
+          isQuestionSetUpdatedDelta(delta) && delta.questionSet.id === questionSet.id,
+      );
+      const pushedQuestionSet = questionSetDelta?.questionSet ?? getBroadcastQuestionSet(message.result);
       if (pushedQuestionSet?.id === questionSet.id) {
         setQuestionSet(pushedQuestionSet);
-        if (pushedQuestionSet.isPublic) {
-          loadRatingProgress(pushedQuestionSet.id).catch((caughtError) => {
-            onError(caughtError instanceof Error ? caughtError.message : "刷新评分进度失败。");
+
+        if (questionSetDelta?.ratedPlayerId) {
+          setRatingProgress((currentProgress) => {
+            if (!currentProgress) {
+              return currentProgress;
+            }
+
+            const ratedPlayerIds = Array.from(new Set([...currentProgress.ratedPlayerIds, questionSetDelta.ratedPlayerId ?? ""])).filter(
+              Boolean,
+            );
+
+            return {
+              ...currentProgress,
+              ratedPlayerIds,
+              ratedCount: ratedPlayerIds.length,
+              playerRating:
+                questionSetDelta.ratedPlayerId === playerId && typeof questionSetDelta.rating === "number"
+                  ? questionSetDelta.rating
+                  : currentProgress.playerRating,
+            };
           });
         }
         return;
       }
-
-      getQuestionSetById(questionSet.id)
-        .then((nextQuestionSet) => {
-          if (nextQuestionSet) {
-            setQuestionSet(nextQuestionSet);
-            if (nextQuestionSet.isPublic) {
-              return loadRatingProgress(nextQuestionSet.id);
-            }
-          }
-        })
-        .catch((caughtError) => {
-          onError(caughtError instanceof Error ? caughtError.message : "刷新题库状态失败。");
-        });
     });
-  }, [onError, questionSet?.id, playerId, playerIds]);
+  }, [playerId, questionSet?.id, room.id]);
 
   async function handleRateQuestionSet() {
     if (!questionSet) {
@@ -759,7 +794,19 @@ function GameResultPanel({
         rating: ratingValue,
       });
       setQuestionSet(rated);
-      await loadRatingProgress(rated.id);
+      setRatingProgress((currentProgress) => {
+        if (!currentProgress) {
+          return currentProgress;
+        }
+
+        const ratedPlayerIds = Array.from(new Set([...currentProgress.ratedPlayerIds, playerId]));
+        return {
+          ...currentProgress,
+          ratedPlayerIds,
+          ratedCount: ratedPlayerIds.length,
+          playerRating: ratingValue,
+        };
+      });
     } catch (caughtError) {
       onError(caughtError instanceof Error ? caughtError.message : "评分失败。");
     } finally {
@@ -1140,43 +1187,15 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       setError("房间已被房主解散。");
     }
 
-    async function refreshRoom() {
-      if (!room?.id) {
-        return;
-      }
-
-      const latestRoom = await getRoomByCode(roomCode);
-
-      if (!latestRoom) {
-        markRoomDissolved();
-        return;
-      }
-
-      const players = await getPlayersByRoomId(room.id);
-
-      if (!players.some((player) => player.id === playerId)) {
-        markRoomDissolved();
-        return;
-      }
-
-      setRoom((currentRoom) =>
-        currentRoom
-          ? {
-              ...currentRoom,
-              hostPlayerId: latestRoom.host_player_id,
-              status: latestRoom.game_status,
-              currentPresenterPlayerId: latestRoom.current_presenter_player_id,
-              currentGameId: latestRoom.current_game_id,
-              preparedQuestionSetId: latestRoom.prepared_question_set_id ?? null,
-              updatedAt: latestRoom.updated_at,
-              players,
-            }
-          : currentRoom,
-      );
-    }
-
     return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
-      const pushedRoom = getBroadcastRoom(message.result);
+      const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
+      if (dissolvedDelta?.roomId === room.id) {
+        markRoomDissolved();
+        return;
+      }
+
+      const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
+      const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
       if (pushedRoom && pushedRoom.id === room.id) {
         if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
           markRoomDissolved();
@@ -1194,12 +1213,8 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
         );
         return;
       }
-
-      refreshRoom().catch((caughtError) => {
-        setError(caughtError instanceof Error ? caughtError.message : "刷新房间状态失败。");
-      });
     });
-  }, [playerId, room?.id, roomCode]);
+  }, [playerId, room?.id]);
 
   const currentPlayer = useMemo(
     () => room?.players.find((player) => player.id === playerId) ?? null,
