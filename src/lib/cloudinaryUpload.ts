@@ -49,7 +49,7 @@ export type UploadProgress = {
 const cloudinaryConfig = {
   cloudName: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ?? "",
   uploadPreset: process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET ?? "",
-  folder: process.env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "",
+  folder: process.env.NEXT_PUBLIC_CLOUDINARY_FOLDER ?? "anime-master-game",
   maxSize: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_MAX_SIZE ?? 960),
   quality: Number(process.env.NEXT_PUBLIC_UPLOAD_IMAGE_QUALITY ?? 0.78),
   format: process.env.NEXT_PUBLIC_UPLOAD_IMAGE_FORMAT ?? "image/webp",
