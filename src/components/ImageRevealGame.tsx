@@ -229,6 +229,8 @@ type AnswerBubble = {
   width: number;
 };
 
+type ResultPublishNextAction = "advanceReviewedQuestion" | "skipQuestion";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -360,6 +362,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
   const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
+  const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
   const [isRevealPreviewOpen, setIsRevealPreviewOpen] = useState(false);
   const [isLabelPromptDisabledForGame, setIsLabelPromptDisabledForGame] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState(16 / 9);
@@ -1709,6 +1712,45 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
+  async function performSkipQuestion() {
+    if (!gameSession) {
+      return;
+    }
+
+    const skipped = await skipCurrentQuestion({
+      gameSessionId: gameSession.id,
+      presenterPlayerId: playerId,
+    });
+    applyGameSession(skipped.gameSession);
+    setImageLoadFailed(false);
+    setSelectedBlocks([]);
+    setSelectedCorrectPlayerIds([]);
+
+    if (skipped.room) {
+      onRoomUpdated?.(skipped.room);
+    }
+
+    await refreshRoundData(skipped.gameSession);
+  }
+
+  async function maybeOpenResultPublishPrompt(nextAction: ResultPublishNextAction) {
+    if (!gameSession) {
+      return false;
+    }
+
+    const questionSet = await getQuestionSetById(gameSession.questionSetId);
+
+    if (!questionSet || questionSet.isPublic || questionSet.createdByPlayerId !== playerId) {
+      return false;
+    }
+
+    setResultPublishQuestionSet(questionSet);
+    setResultPublishNextAction(nextAction);
+    setResultPublishTitle("");
+    setResultPublishDescription("");
+    return true;
+  }
+
   async function handleSkipQuestion() {
     if (!gameSession) {
       return;
@@ -1722,20 +1764,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     setIsSkippingQuestion(true);
     try {
-      const skipped = await skipCurrentQuestion({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-      });
-      applyGameSession(skipped.gameSession);
-      setImageLoadFailed(false);
-      setSelectedBlocks([]);
-      setSelectedCorrectPlayerIds([]);
+      if (!hasNextQuestion) {
+        const isWaitingForPublishDecision = await maybeOpenResultPublishPrompt("skipQuestion");
 
-      if (skipped.room) {
-        onRoomUpdated?.(skipped.room);
+        if (isWaitingForPublishDecision) {
+          return;
+        }
       }
 
-      await refreshRoundData(skipped.gameSession);
+      await performSkipQuestion();
     } catch (error) {
       onError(error instanceof Error ? error.message : "跳过本题失败。");
     } finally {
@@ -1772,12 +1809,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     setIsAdvancingQuestion(true);
     try {
       if (!hasNextQuestion) {
-        const questionSet = await getQuestionSetById(gameSession.questionSetId);
+        const isWaitingForPublishDecision = await maybeOpenResultPublishPrompt("advanceReviewedQuestion");
 
-        if (questionSet && !questionSet.isPublic && questionSet.createdByPlayerId === playerId) {
-          setResultPublishQuestionSet(questionSet);
-          setResultPublishTitle("");
-          setResultPublishDescription("");
+        if (isWaitingForPublishDecision) {
           return;
         }
       }
@@ -1790,20 +1824,47 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
-  async function handleSkipResultPublish() {
-    setResultPublishQuestionSet(null);
+  async function continueAfterResultPublishPrompt(nextAction: ResultPublishNextAction) {
+    if (nextAction === "skipQuestion") {
+      setIsSkippingQuestion(true);
+      try {
+        await performSkipQuestion();
+      } finally {
+        setIsSkippingQuestion(false);
+      }
+      return;
+    }
+
     setIsAdvancingQuestion(true);
     try {
       await finishReviewedQuestion();
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "进入排行榜失败。");
     } finally {
       setIsAdvancingQuestion(false);
     }
   }
 
+  function closeResultPublishPrompt() {
+    setResultPublishQuestionSet(null);
+    setResultPublishNextAction(null);
+  }
+
+  async function handleSkipResultPublish() {
+    if (!resultPublishNextAction) {
+      closeResultPublishPrompt();
+      return;
+    }
+
+    const nextAction = resultPublishNextAction;
+    closeResultPublishPrompt();
+    try {
+      await continueAfterResultPublishPrompt(nextAction);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "进入排行榜失败。");
+    }
+  }
+
   async function handleConfirmResultPublish() {
-    if (!resultPublishQuestionSet || !gameSession) {
+    if (!resultPublishQuestionSet || !resultPublishNextAction || !gameSession) {
       return;
     }
 
@@ -1812,22 +1873,22 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
+    const questionSet = resultPublishQuestionSet;
+    const nextAction = resultPublishNextAction;
     setIsPublishingBeforeResult(true);
     try {
       await publishQuestionSetToCommunity({
-        questionSetId: resultPublishQuestionSet.id,
+        questionSetId: questionSet.id,
         playerId,
         title: resultPublishTitle.trim(),
         description: resultPublishDescription.trim(),
       });
-      setResultPublishQuestionSet(null);
-      setIsAdvancingQuestion(true);
-      await finishReviewedQuestion();
+      closeResultPublishPrompt();
+      await continueAfterResultPublishPrompt(nextAction);
     } catch (error) {
       onError(error instanceof Error ? error.message : "发布到社区失败。");
     } finally {
       setIsPublishingBeforeResult(false);
-      setIsAdvancingQuestion(false);
     }
   }
 
@@ -2808,14 +2869,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 type="button"
                 variant="secondary"
                 onClick={handleSkipResultPublish}
-                disabled={isPublishingBeforeResult || isAdvancingQuestion}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion || isSkippingQuestion}
               >
                 不发布，查看排行榜
               </Button>
               <Button
                 type="button"
                 onClick={handleConfirmResultPublish}
-                disabled={isPublishingBeforeResult || isAdvancingQuestion || !resultPublishTitle.trim()}
+                disabled={isPublishingBeforeResult || isAdvancingQuestion || isSkippingQuestion || !resultPublishTitle.trim()}
               >
                 {isPublishingBeforeResult ? "发布中..." : "发布并查看排行榜"}
               </Button>
