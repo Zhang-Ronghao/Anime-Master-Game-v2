@@ -78,6 +78,7 @@ const MUTATION_NAMES = new Set([
 
 const COMPACT_SNAPSHOT_MUTATION_NAMES = new Set([
   "startGameWithQuestionSet",
+  "confirmRevealBlocks",
   "judgeBuzzerAnswer",
   "settleBuzzerRound",
   "judgeTeamBattleGuess",

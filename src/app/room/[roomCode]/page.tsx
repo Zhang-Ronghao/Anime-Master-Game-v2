@@ -15,6 +15,7 @@ import {
   dissolveRoom,
   getGameSessionById,
   getLeaderboardForGameSession,
+  getRoomWithPlayers,
   getQuestionSetById,
   getQuestionResultsForGameSession,
   getQuestionSetRatingProgress,
@@ -1181,13 +1182,59 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       return;
     }
 
+    let isActive = true;
+
     function markRoomDissolved() {
+      if (!isActive) {
+        return;
+      }
+
       clearLocalRoomSession();
       setRoom(null);
       setError("房间已被房主解散。");
     }
 
-    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
+    function applyRoomUpdate(pushedRoom: Room) {
+      if (!isActive || pushedRoom.id !== room?.id) {
+        return;
+      }
+
+      if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
+        markRoomDissolved();
+        return;
+      }
+
+      setRoom((currentRoom) =>
+        currentRoom
+          ? {
+              ...currentRoom,
+              ...pushedRoom,
+              players: pushedRoom.players.length > 0 ? pushedRoom.players : currentRoom.players,
+            }
+          : pushedRoom,
+      );
+    }
+
+    async function refreshLatestRoom() {
+      try {
+        const latestRoom = await getRoomWithPlayers(roomCode);
+
+        if (!isActive) {
+          return;
+        }
+
+        if (!latestRoom) {
+          markRoomDissolved();
+          return;
+        }
+
+        applyRoomUpdate(latestRoom);
+      } catch {
+        // Realtime remains the primary path; this catch-up read is best effort.
+      }
+    }
+
+    const unsubscribe = subscribeRealtimeTopic(`room:${room.id}`, (message) => {
       const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
       if (dissolvedDelta?.roomId === room.id) {
         markRoomDissolved();
@@ -1197,24 +1244,22 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
       const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
       if (pushedRoom && pushedRoom.id === room.id) {
-        if (pushedRoom.players.length > 0 && !pushedRoom.players.some((player) => player.id === playerId)) {
-          markRoomDissolved();
-          return;
-        }
-
-        setRoom((currentRoom) =>
-          currentRoom
-            ? {
-                ...currentRoom,
-                ...pushedRoom,
-                players: pushedRoom.players.length > 0 ? pushedRoom.players : currentRoom.players,
-              }
-            : pushedRoom,
-        );
+        applyRoomUpdate(pushedRoom);
         return;
       }
     });
-  }, [playerId, room?.id]);
+
+    void refreshLatestRoom();
+    const catchUpTimer = window.setTimeout(() => {
+      void refreshLatestRoom();
+    }, 750);
+
+    return () => {
+      isActive = false;
+      window.clearTimeout(catchUpTimer);
+      unsubscribe();
+    };
+  }, [playerId, room?.id, roomCode]);
 
   const currentPlayer = useMemo(
     () => room?.players.find((player) => player.id === playerId) ?? null,

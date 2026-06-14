@@ -194,7 +194,7 @@ export const confirmRevealBlocks = (params: {
   gameSessionId: string;
   presenterPlayerId: string;
   selectedBlocks: number[];
-}) => rpc<GameSession>("confirmRevealBlocks", params);
+}) => rpc<GameSession & { roundSnapshot?: RoundSnapshot }>("confirmRevealBlocks", params);
 
 export const getAnswersForQuestionRound = (params: {
   gameSessionId: string;

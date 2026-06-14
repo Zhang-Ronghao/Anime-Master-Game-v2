@@ -1460,7 +1460,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
         selectedBlocks,
       });
-      applyGameSessionDelta(updatedGameSession);
+      applyRoundSnapshotFromResult(updatedGameSession) || applyGameSessionDelta(updatedGameSession);
       setSelectedBlocks([]);
     } catch (error) {
       onError(error instanceof Error ? error.message : "确认揭露失败。");
