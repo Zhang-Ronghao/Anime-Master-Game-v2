@@ -1280,8 +1280,9 @@ export async function confirmRevealBlocks(params: {
   const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
   const roundDurationMs = Math.max(1, currentGameSession.round_seconds ?? 60) * 1000;
   const roundEnded = !roundStartedAt || Date.now() - new Date(roundStartedAt).getTime() >= roundDurationMs;
+  const isSettledBetweenRounds = !roundStartedAt && revealedBlocks.length > 0 && revealedBlocks.length < REVEAL_BLOCK_COUNT;
   const nextRevealRound =
-    roundStartedAt && roundEnded
+    (roundStartedAt && roundEnded) || isSettledBetweenRounds
       ? Math.min(maxRevealRounds, currentGameSession.current_reveal_round + 1)
       : currentGameSession.current_reveal_round;
 
@@ -2519,7 +2520,8 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error(updateError.message);
   }
 
-  const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);
+  const nextGameSession =
+    currentSession.gameMode === "ROUND_REVEAL" ? currentSession : await settleBuzzerRoundFromDb(currentGameSession);
 
   return {
     gameSession: nextGameSession,
@@ -3130,45 +3132,21 @@ export async function gradeAnswersAndAdvance(params: {
 
   const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
   const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
-  const shouldAdvanceQuestion = allPlayersCorrect || currentRound >= currentSession.maxRevealRounds;
-  let nextGameSession: GameSession;
+  const { data: settledGameSession, error: settleError } = await d1
+    .from("game_sessions")
+    .update({
+      round_started_at: null,
+    })
+    .eq("id", currentGameSession.id)
+    .select()
+    .single<DbGameSession>();
 
-  if (shouldAdvanceQuestion) {
-    const { data: reviewedGameSession, error: reviewError } = await d1
-      .from("game_sessions")
-      .update({
-        revealed_blocks: ALL_REVEALED_BLOCKS,
-        round_started_at: null,
-      })
-      .eq("id", currentGameSession.id)
-      .select()
-      .single<DbGameSession>();
-
-    if (reviewError) {
-      throw new Error(reviewError.message);
-    }
-
-    nextGameSession = toGameSession(reviewedGameSession);
-  } else {
-    const { data: updatedGameSession, error: nextRoundError } = await d1
-      .from("game_sessions")
-      .update({
-        current_reveal_round: currentRound + 1,
-        round_started_at: null,
-      })
-      .eq("id", currentGameSession.id)
-      .select()
-      .single<DbGameSession>();
-
-    if (nextRoundError) {
-      throw new Error(nextRoundError.message);
-    }
-
-    nextGameSession = toGameSession(updatedGameSession);
+  if (settleError) {
+    throw new Error(settleError.message);
   }
 
   return {
-    gameSession: nextGameSession,
+    gameSession: toGameSession(settledGameSession),
     room: null,
     newlyScoredPlayerIds,
   };

@@ -213,8 +213,6 @@ CLOUDINARY_API_SECRET
 
 这两个是 Worker runtime secrets，不要写进 `wrangler.toml`，也不要配到 Pages。
 
-如果 Git 连接部署误识别成 Next.js，见常见问题。
-
 ### 3. 部署 Pages
 
 在 Cloudflare 创建 Pages：
@@ -463,27 +461,6 @@ git push
 ```
 
 改完 Pages 环境变量后，在 Pages 的 `Deployments` 里重新运行最近一次 Git deployment。
-
-### Worker Git 连接部署误识别成 Next.js
-
-如果日志里出现：
-
-```text
-Framework: Next.js
-Output Directory: .next
-The version of Next.js used in the project cannot be automatically configured
-```
-
-说明 Cloudflare 把 Worker 部署识别成了 Next.js framework 项目。Worker 应该改成：
-
-```text
-Framework preset: None / No preset
-Build command: 留空
-Deploy command: npx wrangler deploy
-Root directory: 项目根目录
-```
-
-如果 UI 不允许修改，删掉这个错误创建的 Worker Git 部署，重新创建时不要选择 Next.js/framework 模板。
 
 ### 线上提示数据库表不存在
 

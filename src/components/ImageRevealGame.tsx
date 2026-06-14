@@ -373,12 +373,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
+  const [playerImageCanvas, setPlayerImageCanvas] = useState<HTMLCanvasElement | null>(null);
   const playerImageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const playerLoadedImageRef = useRef<{ questionId: string; imageUrl: string; image: HTMLImageElement } | null>(null);
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
+
+  const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
+    playerImageCanvasRef.current = canvas;
+    setPlayerImageCanvas(canvas);
+  }, []);
 
   const getPlayerName = useCallback(
     (targetPlayerId: string) => room.players.find((player) => player.id === targetPlayerId)?.nickname ?? targetPlayerId,
@@ -781,7 +787,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
-    const canvas = playerImageCanvasRef.current;
+    const canvas = playerImageCanvas;
     if (!canvas) {
       return;
     }
@@ -851,7 +857,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       image.onload = null;
       image.onerror = null;
     };
-  }, [currentQuestion, gameSession?.revealedBlocks, isPresenter, playerImageRetryAttempt, playerImageRetryToken, revealedBlocksKey]);
+  }, [
+    currentQuestion,
+    gameSession?.revealedBlocks,
+    isPresenter,
+    playerImageCanvas,
+    playerImageRetryAttempt,
+    playerImageRetryToken,
+    revealedBlocksKey,
+  ]);
 
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
@@ -1075,14 +1089,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isCurrentPlayerCorrect &&
     !myBuzzerAnswer &&
     isRoundActive;
-  const canGrade = false;
+  const isStandardRoundSettled = !isTeamBattleMode && !isQuestionReviewing && !hasRoundStarted && revealedBlockSet.size > 0;
+  const canGrade = Boolean(isPresenter && !isTeamBattleMode && !isQuestionReviewing && hasRoundStarted);
   const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
     isPresenter &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     pendingBuzzerAnswers.length === 0 &&
-    (isBuzzerMode ? isRoundEnded : hasRoundStarted && (isRoundEnded || allActiveGuessersSubmitted)) &&
+    (isBuzzerMode ? isRoundEnded : isStandardRoundSettled || (hasRoundStarted && (isRoundEnded || allActiveGuessersSubmitted))) &&
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
   const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
@@ -1137,6 +1152,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       (guessers.length > 0 && guessers.every((player) => correctPlayerSet.has(player.id))));
   const buzzerSettleActionText = isBuzzerSettleToReview ? "公布答案" : "进入下一轮";
   const standardSettleActionText = isBuzzerMode ? buzzerSettleActionText : currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
+  const standardAdvanceActionText = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人揭露图片";
@@ -1162,6 +1178,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       } else if (currentBuzzerAnswer) {
         standardTaskTitle = "判定答案";
         standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
+      } else if (isStandardRoundSettled) {
+        standardTaskTitle = standardAdvanceActionText;
+        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (isRoundEnded || allActiveGuessersSubmitted) {
         standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -1177,6 +1196,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       standardTaskTone = "border-emerald-200 bg-emerald-50";
       standardTaskTitle = "已答对";
       standardTaskDetail = "等待下一题";
+    } else if (isStandardRoundSettled) {
+      standardTaskBadge = "出题人";
+      standardTaskTone = "border-amber-200 bg-amber-50";
+      standardTaskTitle = standardAdvanceActionText;
+      standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
     } else if (!hasRoundStarted) {
       standardTaskTitle = "等待揭图";
       standardTaskDetail = "出题人正在选格";
@@ -2065,7 +2089,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             aria-label="已揭露的图片区域"
             className="block h-full w-full bg-black"
             key={currentQuestion.id}
-            ref={playerImageCanvasRef}
+            ref={setPlayerImageCanvasRef}
           />
         )}
 
@@ -2198,10 +2222,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     <div className="rounded-md border border-[var(--line)] bg-slate-50 p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
       {isQuestionReviewing ? (
         <>
-          <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
-          </p>
+              <p className="text-sm font-semibold text-slate-950">本题已结束，当前展示完整图片。</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">
+                {isPresenter ? "确认后切换到下一阶段。" : "等待出题人切换到下一阶段。"}
+              </p>
           <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm">
             <p className="font-semibold text-slate-950">图片标签</p>
             <p className="mt-1 text-[var(--muted)]">{currentQuestionLabel || "暂无标签"}</p>
@@ -2956,7 +2980,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <p className="text-sm text-[var(--muted)]">
                 已选择 {selectedCorrectPlayerIds.length} 名玩家，本轮分值 {currentScore} 分。
               </p>
-              <Button type="button" onClick={handleGradeAnswers} disabled={!canGrade || isGrading}>
+          <Button type="button" onClick={handleGradeAnswers} disabled={!canGrade || isGrading}>
                 {isGrading ? "判分中..." : "确认判分"}
               </Button>
             </div>
