@@ -13,6 +13,7 @@ import type {
   Question,
   QuestionResult,
   QuestionSet,
+  RoundSnapshot,
   Room,
   TeamBattleGuessVote,
 } from "@/types/game";
@@ -225,6 +226,8 @@ export const getBuzzerAnswerForPlayerRound = (params: {
   revealRound: number;
   playerId: string;
 }) => rpc<BuzzerAnswer | null>("getBuzzerAnswerForPlayerRound", params);
+
+export const getRoundSnapshot = (gameSessionId: string) => rpc<RoundSnapshot>("getRoundSnapshot", gameSessionId);
 
 export const getPlayerScores = (gameSessionId: string) => rpc<PlayerScore[]>("getPlayerScores", gameSessionId);
 

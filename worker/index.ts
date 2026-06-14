@@ -1,5 +1,7 @@
 ﻿import * as gameService from "./gameService";
 
+import type { RoundSnapshot } from "../src/types/game";
+
 export interface Env {
   DB: D1Database;
   ROOM_OBJECTS: DurableObjectNamespace;
@@ -25,6 +27,8 @@ type BroadcastMessage = {
   result: unknown;
   args: unknown[];
   topics: string[];
+  clientActionId?: string;
+  roundSnapshot?: RoundSnapshot;
 };
 
 type CloudinaryResource = {
@@ -68,6 +72,25 @@ const MUTATION_NAMES = new Set([
   "skipCurrentQuestion",
   "endCurrentGameEarly",
   "returnRoomToLobby",
+]);
+
+const ROUND_SNAPSHOT_MUTATION_NAMES = new Set([
+  "startGameWithQuestionSet",
+  "confirmRevealBlocks",
+  "submitAnswer",
+  "submitForfeitAnswer",
+  "cancelForfeitAnswer",
+  "judgeBuzzerAnswer",
+  "settleBuzzerRound",
+  "submitTeamBattleRevealVote",
+  "submitTeamBattleGuessVote",
+  "finalizeTeamBattleVote",
+  "judgeTeamBattleGuess",
+  "revealTeamBattleAnswer",
+  "gradeAnswersAndAdvance",
+  "advanceReviewedQuestion",
+  "skipCurrentQuestion",
+  "endCurrentGameEarly",
 ]);
 
 function corsHeaders(request: Request, env: Env) {
@@ -152,6 +175,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function isGameSessionRecord(value: Record<string, unknown>) {
+  return typeof value.id === "string" && typeof value.roomId === "string" && "currentQuestionIndex" in value;
+}
+
 function addTopic(topics: Set<string>, prefix: string, value: unknown) {
   if (typeof value === "string" && value.trim()) {
     topics.add(`${prefix}:${value}`);
@@ -187,10 +214,11 @@ function deriveTopics(name: string, args: unknown[], result: unknown) {
     }
     if (isRecord(gameSession)) {
       addTopic(topics, "game", gameSession.id);
-      addTopic(topics, "room", gameSession.roomId);
       addTopic(topics, "question-set", gameSession.questionSetId);
     }
-    addTopic(topics, "question-set", result.questionSetId);
+    if (!isGameSessionRecord(result)) {
+      addTopic(topics, "question-set", result.questionSetId);
+    }
     addTopic(topics, "game", result.gameSessionId);
   }
 
@@ -199,6 +227,51 @@ function deriveTopics(name: string, args: unknown[], result: unknown) {
   }
 
   return Array.from(topics);
+}
+
+function getResultGameSessionId(result: unknown) {
+  if (!isRecord(result)) {
+    return null;
+  }
+
+  if (isGameSessionRecord(result)) {
+    return result.id;
+  }
+
+  const gameSession = result.gameSession;
+  if (isRecord(gameSession) && typeof gameSession.id === "string") {
+    return gameSession.id;
+  }
+
+  if (typeof result.gameSessionId === "string") {
+    return result.gameSessionId;
+  }
+
+  return null;
+}
+
+async function getRoundSnapshotForMutation(name: string, result: unknown) {
+  if (!ROUND_SNAPSHOT_MUTATION_NAMES.has(name)) {
+    return null;
+  }
+
+  const gameSessionId = getResultGameSessionId(result);
+  if (!gameSessionId) {
+    return null;
+  }
+
+  return await gameService.getRoundSnapshot(gameSessionId);
+}
+
+function attachRoundSnapshot(result: unknown, roundSnapshot: RoundSnapshot | null) {
+  if (!roundSnapshot || !isRecord(result)) {
+    return result;
+  }
+
+  return {
+    ...result,
+    roundSnapshot,
+  };
 }
 
 async function broadcast(env: Env, message: BroadcastMessage) {
@@ -217,15 +290,25 @@ async function handleRpc(request: Request, env: Env) {
   const name = body.name ?? "";
   const args = body.args ?? [];
   const result = await callGameFunction(env, name, args);
+  const roundSnapshot = await getRoundSnapshotForMutation(name, result);
+  const responseResult = attachRoundSnapshot(result, roundSnapshot);
 
   if (MUTATION_NAMES.has(name)) {
-    const topics = deriveTopics(name, args, result);
+    const topics = deriveTopics(name, args, responseResult);
     if (topics.length > 0) {
-      await broadcast(env, { type: "change", name, result, args, topics });
+      await broadcast(env, {
+        type: "change",
+        name,
+        result: responseResult,
+        args,
+        topics,
+        clientActionId: body.clientActionId,
+        roundSnapshot: roundSnapshot ?? undefined,
+      });
     }
   }
 
-  return json({ data: result }, {}, request, env);
+  return json({ data: responseResult }, {}, request, env);
 }
 
 async function handleCloudinaryImages(request: Request, env: Env) {
@@ -329,16 +412,26 @@ export class RoomDurableObject {
       }
 
       const result = await callGameFunction(this.env, payload.name, payload.args ?? []);
+      const roundSnapshot = await getRoundSnapshotForMutation(payload.name, result);
+      const responseResult = attachRoundSnapshot(result, roundSnapshot);
       if (actionKey) {
-        this.recentActions.set(actionKey, { expiresAt: Date.now() + ACTION_RESULT_TTL_MS, result });
+        this.recentActions.set(actionKey, { expiresAt: Date.now() + ACTION_RESULT_TTL_MS, result: responseResult });
       }
 
-      const topics = deriveTopics(payload.name, payload.args ?? [], result);
+      const topics = deriveTopics(payload.name, payload.args ?? [], responseResult);
       if (topics.length > 0) {
-        await broadcast(this.env, { type: "change", name: payload.name, result, args: payload.args ?? [], topics });
+        await broadcast(this.env, {
+          type: "change",
+          name: payload.name,
+          result: responseResult,
+          args: payload.args ?? [],
+          topics,
+          clientActionId: payload.clientActionId,
+          roundSnapshot: roundSnapshot ?? undefined,
+        });
       }
 
-      socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: result }));
+      socket.send(JSON.stringify({ type: "action_result", clientActionId: payload.clientActionId, data: responseResult }));
     } catch (error) {
       socket.send(
         JSON.stringify({

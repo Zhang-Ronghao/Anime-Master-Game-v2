@@ -21,7 +21,3 @@ ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
 CLOUDINARY_CLOUD_NAME = "dfdfibosf"
 CLOUDINARY_FOLDER = "anime-master-game"
 CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
-
-[observability]
-enabled = true
-head_sampling_rate = 1

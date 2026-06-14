@@ -20,6 +20,7 @@ import type {
   Question,
   QuestionResult,
   QuestionSet,
+  RoundSnapshot,
   Room,
   TeamBattleGuessVote,
   TeamBattleState,
@@ -1452,6 +1453,99 @@ export async function getBuzzerAnswerForPlayerRound(params: {
   }
 
   return data ? toBuzzerAnswer(data) : null;
+}
+
+export async function getRoundSnapshot(gameSessionId: string): Promise<RoundSnapshot> {
+  assertD1Env();
+
+  const gameSession = await getGameSessionById(gameSessionId);
+
+  if (!gameSession) {
+    throw new Error("刷新游戏快照失败：当前游戏不存在。");
+  }
+
+  const questionIndex = gameSession.currentQuestionIndex;
+  const revealRound = gameSession.currentRevealRound;
+  const [
+    { data: scores, error: scoresError },
+    { data: questionResults, error: questionResultsError },
+    { data: currentRoundAnswers, error: currentRoundAnswersError },
+    { data: questionAnswers, error: questionAnswersError },
+    { data: currentRoundBuzzerAnswers, error: currentRoundBuzzerAnswersError },
+    { data: questionBuzzerAnswers, error: questionBuzzerAnswersError },
+  ] = await Promise.all([
+    d1
+      .from("player_scores")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .order("score", { ascending: false })
+      .returns<DbPlayerScore[]>(),
+    d1
+      .from("question_results")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", questionIndex)
+      .returns<DbQuestionResult[]>(),
+    d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", questionIndex)
+      .eq("reveal_round", revealRound)
+      .order("submitted_at", { ascending: true })
+      .returns<DbAnswer[]>(),
+    d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", questionIndex)
+      .order("submitted_at", { ascending: true })
+      .returns<DbAnswer[]>(),
+    d1
+      .from("buzzer_answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", questionIndex)
+      .eq("reveal_round", revealRound)
+      .order("submitted_at", { ascending: true })
+      .returns<DbBuzzerAnswer[]>(),
+    d1
+      .from("buzzer_answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", questionIndex)
+      .order("submitted_at", { ascending: true })
+      .returns<DbBuzzerAnswer[]>(),
+  ]);
+
+  if (scoresError) {
+    throw new Error(scoresError.message);
+  }
+  if (questionResultsError) {
+    throw new Error(questionResultsError.message);
+  }
+  if (currentRoundAnswersError) {
+    throw new Error(currentRoundAnswersError.message);
+  }
+  if (questionAnswersError) {
+    throw new Error(questionAnswersError.message);
+  }
+  if (currentRoundBuzzerAnswersError) {
+    throw new Error(currentRoundBuzzerAnswersError.message);
+  }
+  if (questionBuzzerAnswersError) {
+    throw new Error(questionBuzzerAnswersError.message);
+  }
+
+  return {
+    gameSession,
+    scores: (scores ?? []).map(toPlayerScore),
+    questionResults: (questionResults ?? []).map(toQuestionResult),
+    answers: (currentRoundAnswers ?? []).map(toAnswer),
+    labelAnswers: (questionAnswers ?? []).map(toAnswer),
+    buzzerAnswers: (currentRoundBuzzerAnswers ?? []).map(toBuzzerAnswer),
+    labelBuzzerAnswers: (questionBuzzerAnswers ?? []).map(toBuzzerAnswer),
+  };
 }
 
 export async function getPlayerScores(gameSessionId: string) {

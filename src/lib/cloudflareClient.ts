@@ -1,11 +1,15 @@
 ﻿"use client";
 
+import type { RoundSnapshot } from "@/types/game";
+
 type ChangeMessage = {
   type: "change";
   name: string;
   result: unknown;
   args: unknown[];
   topics: string[];
+  clientActionId?: string;
+  roundSnapshot?: RoundSnapshot;
 };
 
 type ActionResultMessage = {

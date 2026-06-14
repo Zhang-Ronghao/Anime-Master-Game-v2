@@ -9,17 +9,10 @@ import {
   cancelForfeitAnswer,
   confirmRevealBlocks,
   finalizeTeamBattleVote,
-  getAnswersForQuestion,
-  getAnswerForPlayerRound,
-  getAnswersForQuestionRound,
-  getBuzzerAnswerForPlayerRound,
-  getBuzzerAnswersForQuestion,
-  getBuzzerAnswersForQuestionRound,
   getGameSessionById,
-  getPlayerScores,
   getQuestionSetById,
-  getQuestionResultsForQuestion,
   getQuestionsByQuestionSetId,
+  getRoundSnapshot,
   gradeAnswersAndAdvance,
   judgeTeamBattleGuess,
   judgeBuzzerAnswer,
@@ -46,6 +39,7 @@ import type {
   Question,
   QuestionSet,
   QuestionResult,
+  RoundSnapshot,
   Room,
   TeamBattleGuessVote,
   TeamBattlePhase,
@@ -259,6 +253,35 @@ function isQuestion(value: unknown): value is Question {
   return isRecord(value) && typeof value.id === "string" && typeof value.questionSetId === "string" && "orderIndex" in value;
 }
 
+function isRoundSnapshot(value: unknown): value is RoundSnapshot {
+  return (
+    isRecord(value) &&
+    isGameSession(value.gameSession) &&
+    Array.isArray(value.scores) &&
+    Array.isArray(value.questionResults) &&
+    Array.isArray(value.answers) &&
+    Array.isArray(value.labelAnswers) &&
+    Array.isArray(value.buzzerAnswers) &&
+    Array.isArray(value.labelBuzzerAnswers)
+  );
+}
+
+function getBroadcastRoundSnapshot(message: { result?: unknown; roundSnapshot?: unknown }) {
+  if (isRoundSnapshot(message.roundSnapshot)) {
+    return message.roundSnapshot;
+  }
+
+  if (isRecord(message.result) && isRoundSnapshot(message.result.roundSnapshot)) {
+    return message.result.roundSnapshot;
+  }
+
+  return null;
+}
+
+function getRoundSnapshotFromValue(value: unknown) {
+  return isRecord(value) && isRoundSnapshot(value.roundSnapshot) ? value.roundSnapshot : null;
+}
+
 function getBroadcastGameSession(result: unknown) {
   if (isGameSession(result)) {
     return result;
@@ -444,110 +467,69 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     );
   }
 
-  const refreshRoundData = useCallback(
-    async (targetGameSession: GameSession) => {
-      const [nextScores, nextResults] = await Promise.all([
-        getPlayerScores(targetGameSession.id),
-        getQuestionResultsForQuestion({
-          gameSessionId: targetGameSession.id,
-          questionIndex: targetGameSession.currentQuestionIndex,
-        }),
-      ]);
-
-      setScores(nextScores);
-      setQuestionResults(nextResults);
+  const applyRoundSnapshot = useCallback(
+    (snapshot: RoundSnapshot) => {
+      const targetGameSession = snapshot.gameSession;
+      applyGameSession(targetGameSession);
+      setScores(snapshot.scores);
+      setQuestionResults(snapshot.questionResults);
 
       if (targetGameSession.gameMode === "ROUND_REVEAL") {
-        const [nextAnswers, nextBuzzerAnswers] = await Promise.all([
-          getAnswersForQuestionRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-          }),
-          getBuzzerAnswersForQuestionRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-          }),
-        ]);
-        setAnswers(nextAnswers);
-        setBuzzerAnswers(nextBuzzerAnswers);
+        setAnswers(snapshot.answers);
+        setBuzzerAnswers(snapshot.buzzerAnswers);
 
         if (isPresenter) {
-          const nextLabelAnswers = await getAnswersForQuestion({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-          });
-          setLabelAnswers(nextLabelAnswers.filter((answer) => !isForfeitAnswer(answer)));
+          setLabelAnswers(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer)));
           setMyBuzzerAnswer(null);
         } else {
-          const [nextMyAnswer, nextMyBuzzerAnswer] = await Promise.all([
-            getAnswerForPlayerRound({
-              gameSessionId: targetGameSession.id,
-              questionIndex: targetGameSession.currentQuestionIndex,
-              revealRound: targetGameSession.currentRevealRound,
-              playerId,
-            }),
-            getBuzzerAnswerForPlayerRound({
-              gameSessionId: targetGameSession.id,
-              questionIndex: targetGameSession.currentQuestionIndex,
-              revealRound: targetGameSession.currentRevealRound,
-              playerId,
-            }),
-          ]);
           setLabelAnswers([]);
-          setMyAnswer(nextMyAnswer);
-          setMyBuzzerAnswer(nextMyBuzzerAnswer);
+          setMyAnswer(snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
+          setMyBuzzerAnswer(snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
         }
-      } else if (targetGameSession.gameMode === "TEAM_BATTLE") {
+        return;
+      }
+
+      if (targetGameSession.gameMode === "TEAM_BATTLE") {
         setAnswers([]);
         setBuzzerAnswers([]);
+        setLabelAnswers([]);
         setMyAnswer(null);
         setMyBuzzerAnswer(null);
-        if (isPresenter) {
-          setLabelAnswers([]);
-        } else {
-          setLabelAnswers([]);
-        }
-      } else {
-        const [nextBuzzerAnswers, nextLabelAnswers] = await Promise.all([
-          getBuzzerAnswersForQuestionRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-          }),
-          getBuzzerAnswersForQuestion({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-          }),
-        ]);
-        setAnswers([]);
-        setBuzzerAnswers(nextBuzzerAnswers);
-        setLabelAnswers(
-          nextLabelAnswers.map((answer) => ({
-            id: answer.id,
-            gameSessionId: answer.gameSessionId,
-            questionIndex: answer.questionIndex,
-            revealRound: answer.revealRound,
-            playerId: answer.playerId,
-            answerText: answer.answerText,
-            submittedAt: answer.submittedAt,
-          })),
-        );
-
-        if (!isPresenter) {
-          const nextMyBuzzerAnswer = await getBuzzerAnswerForPlayerRound({
-            gameSessionId: targetGameSession.id,
-            questionIndex: targetGameSession.currentQuestionIndex,
-            revealRound: targetGameSession.currentRevealRound,
-            playerId,
-          });
-          setMyBuzzerAnswer(nextMyBuzzerAnswer);
-        }
-        setMyAnswer(null);
+        return;
       }
+
+      setAnswers([]);
+      setBuzzerAnswers(snapshot.buzzerAnswers);
+      setLabelAnswers(
+        snapshot.labelBuzzerAnswers.map((answer) => ({
+          id: answer.id,
+          gameSessionId: answer.gameSessionId,
+          questionIndex: answer.questionIndex,
+          revealRound: answer.revealRound,
+          playerId: answer.playerId,
+          answerText: answer.answerText,
+          submittedAt: answer.submittedAt,
+        })),
+      );
+      setMyAnswer(null);
+      setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
     },
     [isPresenter, playerId],
+  );
+
+  const refreshRoundData = useCallback(
+    async (targetGameSession: GameSession, knownSnapshot?: RoundSnapshot | null) => {
+      const snapshot = knownSnapshot ?? getRoundSnapshotFromValue(targetGameSession) ?? (await getRoundSnapshot(targetGameSession.id));
+      applyRoundSnapshot(snapshot);
+    },
+    [applyRoundSnapshot],
+  );
+
+  const refreshRoundDataFromResult = useCallback(
+    async (result: unknown, fallbackGameSession: GameSession) => {
+      await refreshRoundData(fallbackGameSession, getRoundSnapshotFromValue(result));
+    },
+    [refreshRoundData],
   );
 
   const showAnswerBubble = useCallback((answer: Answer) => {
@@ -648,19 +630,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       }
 
       const currentGameSession = gameSessionRef.current;
+      const pushedRoundSnapshot = getBroadcastRoundSnapshot(message);
       const pushedGameSession = getBroadcastGameSession(message.result);
       const applyPushedGameSession = () => {
         if (!pushedGameSession || pushedGameSession.id !== room.currentGameId) {
           return false;
         }
 
-        applyGameSession(pushedGameSession, { syncClock: !serverClockRef.current });
+        if (pushedRoundSnapshot?.gameSession.id === pushedGameSession.id) {
+          applyRoundSnapshot(pushedRoundSnapshot);
+        } else {
+          applyGameSession(pushedGameSession, { syncClock: !serverClockRef.current });
+          refreshRoundData(pushedGameSession).catch((error) => {
+            onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
+          });
+        }
         setImageLoadFailed(false);
         setSelectedBlocks([]);
         setSelectedCorrectPlayerIds([]);
-        refreshRoundData(pushedGameSession).catch((error) => {
-          onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
-        });
         return true;
       };
 
@@ -675,11 +662,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             if (!isForfeitAnswer(pushedAnswer)) {
               setLabelAnswers((currentAnswers) => upsertById(currentAnswers, pushedAnswer));
               showAnswerBubble(pushedAnswer);
-            }
-            if (currentGameSession.gameMode === "ROUND_REVEAL") {
-              refreshRoundData(currentGameSession).catch((error) => {
-                onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
-              });
             }
           }
           if (pushedAnswer.playerId === playerId) {
@@ -743,7 +725,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           onError(error instanceof Error ? error.message : "刷新游戏数据失败。");
         });
     });
-  }, [isPresenter, onError, playerId, refreshRoundData, room.currentGameId, showAnswerBubble]);
+  }, [applyRoundSnapshot, isPresenter, onError, playerId, refreshRoundData, room.currentGameId, showAnswerBubble]);
 
   useEffect(() => {
     setAnswerBubbles({});
@@ -1340,7 +1322,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           applyGameSession(finalized.gameSession);
           setSelectedBlocks([]);
           setTeamSelectedBlocks([]);
-          await refreshRoundData(finalized.gameSession);
+          await refreshRoundDataFromResult(finalized, finalized.gameSession);
         })
         .catch((error) => {
           onError(error instanceof Error ? error.message : "结算团队投票失败。");
@@ -1351,7 +1333,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }, delayMs + 80);
 
     return () => window.clearTimeout(timer);
-  }, [gameSession, isFinalizingTeamBattle, onError, refreshRoundData, teamBattleState?.voteDeadlineAt]);
+  }, [gameSession, isFinalizingTeamBattle, onError, refreshRoundDataFromResult, teamBattleState?.voteDeadlineAt]);
 
   useEffect(() => {
     if (!teamBattleState?.voteDeadlineAt) {
@@ -1480,7 +1462,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyGameSession(updatedGameSession);
       setSelectedBlocks([]);
-      await refreshRoundData(updatedGameSession);
+      await refreshRoundDataFromResult(updatedGameSession, updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "确认揭露失败。");
     } finally {
@@ -1501,7 +1483,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         selectedBlocks: teamSelectedBlocks,
       });
       applyGameSession(updatedGameSession);
-      await refreshRoundData(updatedGameSession);
+      await refreshRoundDataFromResult(updatedGameSession, updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交揭露投票失败。");
     } finally {
@@ -1522,7 +1504,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         vote,
       });
       applyGameSession(updatedGameSession);
-      await refreshRoundData(updatedGameSession);
+      await refreshRoundDataFromResult(updatedGameSession, updatedGameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交猜测投票失败。");
     } finally {
@@ -1544,7 +1526,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       applyGameSession(judged.gameSession);
       setTeamSelectedBlocks([]);
-      await refreshRoundData(judged.gameSession);
+      await refreshRoundDataFromResult(judged, judged.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "判定团队猜测失败。");
     } finally {
@@ -1571,7 +1553,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyGameSession(revealed.gameSession);
       setImageLoadFailed(false);
       setTeamSelectedBlocks([]);
-      await refreshRoundData(revealed.gameSession);
+      await refreshRoundDataFromResult(revealed, revealed.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "公布答案失败。");
     } finally {
@@ -1600,6 +1582,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       setMyAnswer(submitted);
       setAnswerText(submitted.answerText);
+      await refreshRoundDataFromResult(submitted, gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交答案失败。");
     } finally {
@@ -1621,7 +1604,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setMyAnswer(submitted);
       setMyBuzzerAnswer(null);
       setAnswerText("");
-      await refreshRoundData(gameSession);
+      await refreshRoundDataFromResult(submitted, gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "放弃本轮失败。");
     } finally {
@@ -1643,7 +1626,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       applyGameSession(canceled.gameSession);
       setMyAnswer(null);
       setAnswerText("");
-      await refreshRoundData(canceled.gameSession);
+      await refreshRoundDataFromResult(canceled, canceled.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "取消放弃失败。");
     } finally {
@@ -1666,7 +1649,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       setMyBuzzerAnswer(submitted);
       setAnswerText(submitted.answerText);
-      await refreshRoundData(gameSession);
+      await refreshRoundDataFromResult(submitted, gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交抢答失败。");
     } finally {
@@ -1697,7 +1680,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         isCorrect,
       });
       applyGameSession(judged.gameSession);
-      await refreshRoundData(judged.gameSession);
+      await refreshRoundDataFromResult(judged, judged.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "判定答案失败。");
     } finally {
@@ -1717,7 +1700,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         presenterPlayerId: playerId,
       });
       applyGameSession(settled.gameSession);
-      await refreshRoundData(settled.gameSession);
+      await refreshRoundDataFromResult(settled, settled.gameSession);
     } catch (error) {
       onError(error instanceof Error ? error.message : "结算本轮失败。");
     } finally {
@@ -1746,7 +1729,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         onRoomUpdated?.(graded.room);
       }
 
-      await refreshRoundData(graded.gameSession);
+      await refreshRoundDataFromResult(graded, graded.gameSession);
       setIsJudgeModalOpen(false);
     } catch (error) {
       onError(error instanceof Error ? error.message : "确认判分失败。");
@@ -1773,7 +1756,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       onRoomUpdated?.(skipped.room);
     }
 
-    await refreshRoundData(skipped.gameSession);
+    await refreshRoundDataFromResult(skipped, skipped.gameSession);
   }
 
   async function maybeOpenResultPublishPrompt(nextAction: ResultPublishNextAction) {
@@ -1841,7 +1824,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       onRoomUpdated?.(advanced.room);
     }
 
-    await refreshRoundData(advanced.gameSession);
+    await refreshRoundDataFromResult(advanced, advanced.gameSession);
   }
 
   async function handleAdvanceReviewedQuestion() {

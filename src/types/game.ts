@@ -157,6 +157,16 @@ export type QuestionResult = {
   judgedAt: string;
 };
 
+export type RoundSnapshot = {
+  gameSession: GameSession;
+  scores: PlayerScore[];
+  questionResults: QuestionResult[];
+  answers: Answer[];
+  labelAnswers: Answer[];
+  buzzerAnswers: BuzzerAnswer[];
+  labelBuzzerAnswers: BuzzerAnswer[];
+};
+
 export type DbQuestionSet = {
   id: string;
   title: string;
