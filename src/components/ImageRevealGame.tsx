@@ -856,7 +856,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
-  const currentScore = gameSession?.roundScores[Math.min(maxRevealRounds, currentRound) - 1] ?? 1;
+  const currentScore =
+    gameSession?.roundScores[currentRound - 1] ?? Math.max(1, maxRevealRounds - currentRound + 1);
   const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
@@ -1107,7 +1108,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     gameSession?.roundStartedAt,
   ]);
 
-  const standardModeLabel = isBuzzerMode ? "抢答" : "轮揭";
+  const standardModeLabel =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "抢答"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? "顺位"
+        : "轮揭";
+  const rankedNextScore = Math.max(1, guessers.length - questionResults.length);
+  const scoreCardLabel =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "答对分数"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? "下一名分数"
+        : "本轮分数";
+  const scoreCardValue =
+    gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
+      ? "1 分"
+      : gameSession?.gameMode === "BUZZER_RANKED"
+        ? `${rankedNextScore} 分`
+        : `${currentScore} 分`;
   const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
   const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
   const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
@@ -2688,8 +2707,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">本轮分数</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">{currentScore} 分</p>
+              <p className="text-[var(--muted)]">{scoreCardLabel}</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
               <p className="text-[var(--muted)]">倒计时</p>

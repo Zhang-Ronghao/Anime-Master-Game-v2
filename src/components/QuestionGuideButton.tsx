@@ -28,7 +28,7 @@ export function QuestionGuideButton({ className = "" }: { className?: string }) 
   return (
     <>
       <Button className={className} type="button" onClick={() => setIsOpen(true)}>
-        我要出题
+        如何出题
       </Button>
 
       {isOpen ? (
