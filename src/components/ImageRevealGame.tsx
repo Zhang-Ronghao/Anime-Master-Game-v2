@@ -662,8 +662,24 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               setLabelAnswers((currentAnswers) => upsertById(currentAnswers, delta.answer));
               showAnswerBubble(delta.answer);
             }
+            if (isForfeitAnswer(delta.answer)) {
+              setBuzzerAnswers((currentAnswers) =>
+                currentAnswers.filter(
+                  (answer) =>
+                    !(
+                      answer.gameSessionId === delta.answer.gameSessionId &&
+                      answer.questionIndex === delta.answer.questionIndex &&
+                      answer.revealRound === delta.answer.revealRound &&
+                      answer.playerId === delta.answer.playerId
+                    ),
+                ),
+              );
+            }
             if (delta.answer.playerId === playerId) {
               setMyAnswer(delta.answer);
+              if (isForfeitAnswer(delta.answer)) {
+                setMyBuzzerAnswer(null);
+              }
             }
           }
           handled = true;
@@ -858,6 +874,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
+  const isRankedBuzzerMode = gameSession?.gameMode === "BUZZER_RANKED";
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
@@ -909,7 +926,15 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, [teamBattleState?.guessVotes]);
   const activeGuessers = guessers.filter((player) => !correctPlayerSet.has(player.id));
   const currentRoundAnswerPlayerSet = useMemo(() => new Set(answers.map((answer) => answer.playerId)), [answers]);
+  const currentRoundForfeitPlayerSet = useMemo(
+    () => new Set(answers.filter((answer) => isForfeitAnswer(answer)).map((answer) => answer.playerId)),
+    [answers],
+  );
   const buzzerAnswerPlayerSet = useMemo(() => new Set(buzzerAnswers.map((answer) => answer.playerId)), [buzzerAnswers]);
+  const buzzerActionPlayerSet = useMemo(
+    () => new Set([...Array.from(buzzerAnswerPlayerSet), ...Array.from(currentRoundForfeitPlayerSet)]),
+    [buzzerAnswerPlayerSet, currentRoundForfeitPlayerSet],
+  );
   const currentQuestionScoreByPlayerId = useMemo(() => {
     const scoreByPlayerId = new Map<string, number>();
     for (const result of questionResults) {
@@ -922,7 +947,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
-    activeGuessers.length > 0 && activeGuessers.every((player) => buzzerAnswerPlayerSet.has(player.id));
+    activeGuessers.length > 0 && activeGuessers.every((player) => buzzerActionPlayerSet.has(player.id));
   const allActiveGuessersSubmitted =
     activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
   const scoreRows = room.players
@@ -1040,7 +1065,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canForfeitAnswer =
     !isPresenter &&
-    !isBuzzerMode &&
+    (!isBuzzerMode || isRankedBuzzerMode) &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
@@ -1049,7 +1074,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canCancelForfeit =
     !isPresenter &&
-    !isBuzzerMode &&
+    (!isBuzzerMode || isRankedBuzzerMode) &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
@@ -1061,6 +1086,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     !myBuzzerAnswer &&
+    !myHasForfeited &&
     isRoundActive &&
     answerText.trim().length > 0;
   const canTypeBuzzerAnswer =
@@ -1069,6 +1095,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     !myBuzzerAnswer &&
+    !myHasForfeited &&
     isRoundActive;
   const isStandardRoundSettled = !isTeamBattleMode && !isQuestionReviewing && !hasRoundStarted && revealedBlockSet.size > 0;
   const canGrade = Boolean(isPresenter && !isTeamBattleMode && !isQuestionReviewing && hasRoundStarted);
@@ -1123,7 +1150,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
         : `${currentScore} 分`;
-  const standardSubmittedCount = isBuzzerMode ? buzzerAnswerPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const standardSubmittedCount = isBuzzerMode ? buzzerActionPlayerSet.size : currentRoundAnswerPlayerSet.size;
   const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
   const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
   const isBuzzerSettleToReview =
@@ -1190,7 +1217,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       standardTaskTitle = "等待揭图";
       standardTaskDetail = "出题人正在选格";
     } else if (isBuzzerMode) {
-      if (myBuzzerAnswer?.status === "pending") {
+      if (myHasForfeited) {
+        standardTaskTone = "border-slate-200 bg-white";
+        standardTaskTitle = "已放弃";
+        standardTaskDetail = "截止前可取消放弃";
+      } else if (myBuzzerAnswer?.status === "pending") {
         standardTaskTitle = "等待判定";
         standardTaskDetail = `已抢答：${myBuzzerAnswer.answerText}`;
       } else if (myBuzzerAnswer?.status === "wrong") {
@@ -1602,6 +1633,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setMyBuzzerAnswer(null);
       setAnswerText("");
       setAnswers((currentAnswers) => upsertById(currentAnswers, submitted));
+      setBuzzerAnswers((currentAnswers) =>
+        currentAnswers.filter(
+          (answer) =>
+            !(
+              answer.gameSessionId === submitted.gameSessionId &&
+              answer.questionIndex === submitted.questionIndex &&
+              answer.revealRound === submitted.revealRound &&
+              answer.playerId === submitted.playerId
+            ),
+        ),
+      );
     } catch (error) {
       onError(error instanceof Error ? error.message : "放弃本轮失败。");
     } finally {
@@ -2583,6 +2625,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     disabled={
                       !isRoundActive ||
                       (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
+                      (isBuzzerMode && myHasForfeited) ||
                       (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
                     }
                     maxLength={80}
@@ -2608,7 +2651,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                           ? "修改答案"
                           : "提交答案"}
                 </Button>
-                {!isBuzzerMode ? (
+                {!isBuzzerMode || isRankedBuzzerMode ? (
                   <Button
                     className="w-full"
                     type="button"
@@ -2621,7 +2664,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 ) : null}
                 <p className="rounded-md bg-white px-3 py-2 text-sm text-[var(--muted)]">
                   {isBuzzerMode
-                    ? myBuzzerAnswer
+                    ? myHasForfeited
+                      ? "本轮已放弃"
+                      : myBuzzerAnswer
                       ? `本轮已抢答：${myBuzzerAnswer.answerText}`
                       : "本轮尚未抢答"
                     : myBuzzerAnswer?.status === "wrong"

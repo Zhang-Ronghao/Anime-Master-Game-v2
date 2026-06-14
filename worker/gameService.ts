@@ -341,6 +341,10 @@ function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "a
   return "answer_text" in answer ? answer.answer_text === FORFEIT_ANSWER_TEXT : answer.answerText === FORFEIT_ANSWER_TEXT;
 }
 
+function canUseForfeitAnswer(gameMode: GameMode) {
+  return gameMode === "ROUND_REVEAL" || gameMode === "BUZZER_RANKED";
+}
+
 async function areAllGuessersCorrectForQuestion(params: {
   roomId: string;
   gameSessionId: string;
@@ -2232,8 +2236,8 @@ export async function submitForfeitAnswer(params: {
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
-  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("当前不能放弃作答：游戏未进行中，或不是轮次揭露模式。");
+  if (!gameSession || gameSession.status !== "PLAYING" || !canUseForfeitAnswer(gameSession.gameMode)) {
+    throw new Error("当前不能放弃作答：游戏未进行中，或当前模式不支持放弃作答。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
@@ -2341,8 +2345,8 @@ export async function cancelForfeitAnswer(params: {
 
   const gameSession = await getGameSessionById(params.gameSessionId);
 
-  if (!gameSession || gameSession.status !== "PLAYING" || gameSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("当前不能取消放弃：游戏未进行中，或不是轮次揭露模式。");
+  if (!gameSession || gameSession.status !== "PLAYING" || !canUseForfeitAnswer(gameSession.gameMode)) {
+    throw new Error("当前不能取消放弃：游戏未进行中，或当前模式不支持取消放弃。");
   }
 
   if (gameSession.presenterPlayerId === params.playerId || !gameSession.roundStartedAt) {
@@ -2444,6 +2448,25 @@ export async function submitBuzzerAnswer(params: {
 
   if (existingResult) {
     throw new Error("你已答对本题，不能重复抢答。");
+  }
+
+  if (gameSession.gameMode === "BUZZER_RANKED") {
+    const { data: existingAnswer, error: answerLoadError } = await d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .eq("reveal_round", gameSession.currentRevealRound)
+      .eq("player_id", params.playerId)
+      .maybeSingle<DbAnswer>();
+
+    if (answerLoadError) {
+      throw new Error(answerLoadError.message);
+    }
+
+    if (existingAnswer && isForfeitAnswer(existingAnswer)) {
+      throw new Error("你已放弃本轮，取消放弃后才能抢答。");
+    }
   }
 
   const { data, error } = await d1
