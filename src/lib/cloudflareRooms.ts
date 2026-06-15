@@ -266,6 +266,9 @@ export const submitAnswer = (params: { gameSessionId: string; playerId: string; 
 export const submitForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
   rpc<Answer>("submitForfeitAnswer", params);
 
+export const autoForfeitExpiredRound = (params: { gameSessionId: string }) =>
+  rpc<{ gameSession: GameSession }>("autoForfeitExpiredRound", params);
+
 export const cancelForfeitAnswer = (params: { gameSessionId: string; playerId: string }) =>
   rpc<{ gameSession: GameSession; canceledAnswerId: string }>("cancelForfeitAnswer", params);
 

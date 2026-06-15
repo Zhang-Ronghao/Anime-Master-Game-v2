@@ -6,6 +6,7 @@ import { Button } from "@/components/Button";
 import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
+  autoForfeitExpiredRound,
   cancelForfeitAnswer,
   confirmRevealBlocks,
   finalizeTeamBattleVote,
@@ -378,6 +379,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const answerInputRef = useRef<HTMLInputElement | null>(null);
   const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
+  const autoForfeitExpiredRoundKeyRef = useRef<string | null>(null);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
     playerImageCanvasRef.current = canvas;
@@ -868,14 +870,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const correctPlayerSet = useMemo(() => new Set(questionResults.map((result) => result.playerId)), [questionResults]);
   const maxRevealRounds = gameSession?.maxRevealRounds ?? 3;
   const currentRound = gameSession?.currentRevealRound ?? 1;
-  const currentScore =
-    gameSession?.roundScores[currentRound - 1] ?? Math.max(1, maxRevealRounds - currentRound + 1);
   const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
+  const isPreparingNextRevealRound =
+    !hasRoundStarted && revealedBlockSet.size > 0 && revealedBlockSet.size < TOTAL_BLOCKS && currentRound < maxRevealRounds;
+  const displayRound = isPreparingNextRevealRound ? currentRound + 1 : currentRound;
+  const displayScore =
+    gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
   const isQuestionReviewing = isTeamBattleMode
     ? teamBattleState?.phase === "REVIEW"
     : !hasRoundStarted && revealedBlockSet.size === TOTAL_BLOCKS;
@@ -1061,7 +1066,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isQuestionReviewing &&
     !areAllGuessersCorrect &&
     Boolean(gameSession) &&
-    (!gameSession?.roundStartedAt || remainingSeconds === 0) &&
+    !gameSession?.roundStartedAt &&
     currentRound <= maxRevealRounds;
   const canSubmitAnswer =
     !isPresenter &&
@@ -1129,6 +1134,33 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal;
 
   useEffect(() => {
+    if (!gameSession || isTeamBattleMode || !gameSession.roundStartedAt || remainingSeconds > 0) {
+      return;
+    }
+
+    const autoForfeitKey = [
+      gameSession.id,
+      gameSession.currentQuestionIndex,
+      gameSession.currentRevealRound,
+      gameSession.roundStartedAt,
+    ].join(":");
+
+    if (autoForfeitExpiredRoundKeyRef.current === autoForfeitKey) {
+      return;
+    }
+
+    autoForfeitExpiredRoundKeyRef.current = autoForfeitKey;
+    autoForfeitExpiredRound({ gameSessionId: gameSession.id })
+      .then((result) => {
+        applyRoundSnapshotFromResult(result) || applyGameSession(result.gameSession);
+      })
+      .catch((error) => {
+        autoForfeitExpiredRoundKeyRef.current = null;
+        onError(error instanceof Error ? error.message : "自动放弃失败。");
+      });
+  }, [applyRoundSnapshotFromResult, gameSession, isTeamBattleMode, onError, remainingSeconds]);
+
+  useEffect(() => {
     if (!canTypeAnswer || !gameSession?.roundStartedAt) {
       return;
     }
@@ -1182,7 +1214,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       ? "首个答对 +1"
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
-        : `${currentScore} 分`;
+        : `${displayScore} 分`;
   const rawStandardSubmittedCount = isBuzzerMode ? buzzerActionPlayerSet.size : currentRoundAnswerPlayerSet.size;
   const standardSubmittedCount = isRoundEnded
     ? Math.max(rawStandardSubmittedCount, activeGuessers.length)
@@ -1446,7 +1478,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     if (
       !isPresenter ||
       revealedBlockSet.has(blockIndex) ||
-      (remainingSeconds > 0 && Boolean(gameSession?.roundStartedAt))
+      Boolean(gameSession?.roundStartedAt)
     ) {
       return;
     }
@@ -2210,7 +2242,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     !isRevealed && !isSelected ? "hover:bg-rose-300/25" : "",
                   ].join(" ")}
                   data-reveal-grid-button="true"
-                  disabled={isRevealed || (Boolean(gameSession.roundStartedAt) && remainingSeconds > 0)}
+                  disabled={isRevealed || Boolean(gameSession.roundStartedAt)}
                   key={blockIndex}
                   type="button"
                   onClick={() => toggleBlock(blockIndex)}
@@ -2741,7 +2773,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
               <p className="text-[var(--muted)]">当前轮次</p>
               <p className="mt-1 text-lg font-semibold text-slate-950">
-                第 {currentRound} / {maxRevealRounds} 轮
+                第 {displayRound} / {maxRevealRounds} 轮
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">

@@ -1392,6 +1392,11 @@ export async function confirmRevealBlocks(params: {
     throw new Error("揭露方块失败：当前游戏不存在，或你不是出题人。");
   }
 
+  const roundStartedAt = currentGameSession.round_started_at;
+  if (roundStartedAt) {
+    throw new Error("本轮尚未结算，请先判定答案或点击进入下一轮。");
+  }
+
   const allGuessersCorrect = await areAllGuessersCorrectForQuestion({
     roomId: currentGameSession.room_id,
     gameSessionId: currentGameSession.id,
@@ -1413,23 +1418,12 @@ export async function confirmRevealBlocks(params: {
     throw new Error("请至少选择一个尚未揭露的方块。");
   }
 
-  const roundStartedAt = currentGameSession.round_started_at;
   const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
-  const roundDurationMs = Math.max(1, currentGameSession.round_seconds ?? 60) * 1000;
-  const roundEnded = !roundStartedAt || Date.now() - new Date(roundStartedAt).getTime() >= roundDurationMs;
   const isSettledBetweenRounds = !roundStartedAt && revealedBlocks.length > 0 && revealedBlocks.length < REVEAL_BLOCK_COUNT;
   const nextRevealRound =
-    (roundStartedAt && roundEnded) || isSettledBetweenRounds
+    isSettledBetweenRounds
       ? Math.min(maxRevealRounds, currentGameSession.current_reveal_round + 1)
       : currentGameSession.current_reveal_round;
-
-  if (roundStartedAt && !roundEnded) {
-    throw new Error("本轮倒计时尚未结束，暂时不能继续揭露。");
-  }
-
-  if (currentGameSession.current_reveal_round >= maxRevealRounds && roundStartedAt && roundEnded) {
-    throw new Error("已达到最大揭露轮数，请进入判分或复盘。");
-  }
 
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
@@ -2196,11 +2190,43 @@ async function revealQuestionForReview(gameSessionId: string) {
   return toGameSession(reviewedGameSession);
 }
 
-async function moveToNextRevealRound(currentGameSession: DbGameSession) {
+async function forfeitMissingRoundActions(
+  currentGameSession: DbGameSession,
+  currentSession: GameSession,
+  roundActionState = await getRoundActionState(currentSession),
+) {
+  const now = new Date().toISOString();
+  const missingGuesserIds = roundActionState.eligibleGuesserIds.filter(
+    (guesserId) => !roundActionState.hasPlayerActed(guesserId),
+  );
+
+  for (const guesserId of missingGuesserIds) {
+    const { error } = await d1.from("answers").upsert(
+      {
+        game_session_id: currentGameSession.id,
+        question_index: currentGameSession.current_question_index,
+        reveal_round: currentGameSession.current_reveal_round,
+        player_id: guesserId,
+        answer_text: FORFEIT_ANSWER_TEXT,
+        submitted_at: now,
+      },
+      {
+        onConflict: "game_session_id,question_index,reveal_round,player_id",
+      },
+    );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  }
+
+  return missingGuesserIds.length;
+}
+
+async function settleRevealRoundForNextSelection(currentGameSession: DbGameSession) {
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
-      current_reveal_round: currentGameSession.current_reveal_round + 1,
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)
@@ -2216,7 +2242,6 @@ async function moveToNextRevealRound(currentGameSession: DbGameSession) {
 
 async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
   const currentSession = toGameSession(currentGameSession);
-  const questionIndex = currentGameSession.current_question_index;
   const currentRound = currentGameSession.current_reveal_round;
   const roundStartedAt = currentGameSession.round_started_at;
   const roundEnded = Boolean(
@@ -2226,32 +2251,7 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
   let roundActionState = await getRoundActionState(currentSession);
 
   if (roundEnded) {
-    const now = new Date().toISOString();
-    const missingGuesserIds = roundActionState.eligibleGuesserIds.filter(
-      (guesserId) => !roundActionState.hasPlayerActed(guesserId),
-    );
-
-    for (const guesserId of missingGuesserIds) {
-      const { error } = await d1.from("answers").upsert(
-        {
-          game_session_id: currentGameSession.id,
-          question_index: questionIndex,
-          reveal_round: currentRound,
-          player_id: guesserId,
-          answer_text: FORFEIT_ANSWER_TEXT,
-          submitted_at: now,
-        },
-        {
-          onConflict: "game_session_id,question_index,reveal_round,player_id",
-        },
-      );
-
-      if (error) {
-        throw new Error(error.message);
-      }
-    }
-
-    if (missingGuesserIds.length > 0) {
+    if (await forfeitMissingRoundActions(currentGameSession, currentSession, roundActionState)) {
       roundActionState = await getRoundActionState(currentSession);
     }
   }
@@ -2276,10 +2276,49 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
       return revealQuestionForReview(currentGameSession.id);
     }
 
-    return moveToNextRevealRound(currentGameSession);
+    return settleRevealRoundForNextSelection(currentGameSession);
   }
 
   return currentSession;
+}
+
+export async function autoForfeitExpiredRound(params: {
+  gameSessionId: string;
+}) {
+  assertD1Env();
+
+  const { data: currentGameSession, error } = await d1
+    .from("game_sessions")
+    .select("*")
+    .eq("id", params.gameSessionId)
+    .eq("status", "PLAYING")
+    .maybeSingle<DbGameSession>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!currentGameSession) {
+    throw new Error("自动放弃失败：当前游戏不存在或已结束。");
+  }
+
+  const currentSession = toGameSession(currentGameSession);
+  if (!canUseForfeitAnswer(currentSession.gameMode)) {
+    return { gameSession: currentSession };
+  }
+
+  if (!currentSession.roundStartedAt) {
+    return { gameSession: currentSession };
+  }
+
+  const roundEnded = Date.now() - new Date(currentSession.roundStartedAt).getTime() >= currentSession.roundSeconds * 1000;
+  if (!roundEnded) {
+    return { gameSession: currentSession };
+  }
+
+  await forfeitMissingRoundActions(currentGameSession, currentSession);
+
+  return { gameSession: currentSession };
 }
 
 export async function submitAnswer(params: {
