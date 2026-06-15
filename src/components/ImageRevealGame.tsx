@@ -2085,7 +2085,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                         +{currentQuestionScoreAwarded} 分
                       </span>
                     ) : null}
-                    {!isPresenter && !alreadyCorrect && hasAnsweredCurrentRound ? (
+                    {!alreadyCorrect && hasAnsweredCurrentRound ? (
                       <span className="rounded bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">已回答</span>
                     ) : null}
                     {isBuzzerMode && buzzerAnswer?.status === "pending" ? (
