@@ -345,6 +345,10 @@ function canUseForfeitAnswer(gameMode: GameMode) {
   return gameMode !== "TEAM_BATTLE";
 }
 
+function isBuzzerAnswerReadyForJudging(answer: Pick<DbBuzzerAnswer, "submitted_at">, nowMs = Date.now()) {
+  return nowMs - new Date(answer.submitted_at).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
+}
+
 async function getRoundActionState(gameSession: GameSession) {
   const [
     { data: players, error: playersError },
@@ -516,6 +520,7 @@ const ALL_REVEALED_BLOCKS = Array.from({ length: REVEAL_BLOCK_COUNT }, (_, index
 const MAX_PLAYERS_PER_ROOM = 15;
 const TEAM_BATTLE_VOTE_GRACE_SECONDS = 5;
 const BUZZER_CLIENT_TIME_MAX_EARLY_MS = 5000;
+const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 
 export type QuestionImportItem = {
@@ -1931,11 +1936,18 @@ export async function getQuestionResultsForGameSession(gameSessionId: string) {
   return (data ?? []).map(toQuestionResult);
 }
 
-async function addScoreToPlayer(params: {
+async function adjustPlayerScore(params: {
   gameSessionId: string;
   playerId: string;
-  scoreAwarded: number;
+  scoreDelta: number;
+  correctCountDelta?: number;
 }) {
+  const correctCountDelta = params.correctCountDelta ?? 0;
+
+  if (params.scoreDelta === 0 && correctCountDelta === 0) {
+    return;
+  }
+
   const { data: existingScore, error: scoreLoadError } = await d1
     .from("player_scores")
     .select("*")
@@ -1952,8 +1964,8 @@ async function addScoreToPlayer(params: {
       id: existingScore?.id,
       game_session_id: params.gameSessionId,
       player_id: params.playerId,
-      score: (existingScore?.score ?? 0) + params.scoreAwarded,
-      correct_count: (existingScore?.correct_count ?? 0) + 1,
+      score: Math.max(0, (existingScore?.score ?? 0) + params.scoreDelta),
+      correct_count: Math.max(0, (existingScore?.correct_count ?? 0) + correctCountDelta),
     },
     {
       onConflict: "game_session_id,player_id",
@@ -1963,6 +1975,101 @@ async function addScoreToPlayer(params: {
   if (scoreError) {
     throw new Error(scoreError.message);
   }
+}
+
+async function addScoreToPlayer(params: {
+  gameSessionId: string;
+  playerId: string;
+  scoreAwarded: number;
+}) {
+  await adjustPlayerScore({
+    gameSessionId: params.gameSessionId,
+    playerId: params.playerId,
+    scoreDelta: params.scoreAwarded,
+    correctCountDelta: 1,
+  });
+}
+
+async function recalculateRankedBuzzerScores(params: {
+  gameSession: DbGameSession;
+}) {
+  const [{ data: players, error: playersError }, { data: results, error: resultsError }, { data: correctBuzzerAnswers, error: answersError }] =
+    await Promise.all([
+      d1.from("players").select("id").eq("room_id", params.gameSession.room_id).returns<{ id: string }[]>(),
+      d1
+        .from("question_results")
+        .select("*")
+        .eq("game_session_id", params.gameSession.id)
+        .eq("question_index", params.gameSession.current_question_index)
+        .returns<DbQuestionResult[]>(),
+      d1
+        .from("buzzer_answers")
+        .select("*")
+        .eq("game_session_id", params.gameSession.id)
+        .eq("question_index", params.gameSession.current_question_index)
+        .eq("status", "correct")
+        .returns<DbBuzzerAnswer[]>(),
+    ]);
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+
+  if (resultsError) {
+    throw new Error(resultsError.message);
+  }
+
+  if (answersError) {
+    throw new Error(answersError.message);
+  }
+
+  const guesserCount = (players ?? []).filter((player) => player.id !== params.gameSession.presenter_player_id).length;
+  const answerByPlayerId = new Map((correctBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const rankedResults = (results ?? [])
+    .map((result) => ({ result, answer: answerByPlayerId.get(result.player_id) }))
+    .filter((item): item is { result: DbQuestionResult; answer: DbBuzzerAnswer } => Boolean(item.answer))
+    .sort(
+      (a, b) =>
+        new Date(a.answer.submitted_at).getTime() - new Date(b.answer.submitted_at).getTime() ||
+        new Date(a.result.judged_at).getTime() - new Date(b.result.judged_at).getTime() ||
+        a.result.id.localeCompare(b.result.id),
+    );
+  const scoreByPlayerId = new Map<string, number>();
+
+  for (const [index, item] of rankedResults.entries()) {
+    const nextScoreAwarded = Math.max(1, guesserCount - index);
+    scoreByPlayerId.set(item.result.player_id, nextScoreAwarded);
+
+    if (item.result.score_awarded !== nextScoreAwarded) {
+      await adjustPlayerScore({
+        gameSessionId: params.gameSession.id,
+        playerId: item.result.player_id,
+        scoreDelta: nextScoreAwarded - item.result.score_awarded,
+      });
+
+      const { error: resultUpdateError } = await d1
+        .from("question_results")
+        .update({ score_awarded: nextScoreAwarded })
+        .eq("id", item.result.id);
+
+      if (resultUpdateError) {
+        throw new Error(resultUpdateError.message);
+      }
+    }
+
+    if (item.answer.score_awarded !== nextScoreAwarded) {
+      const { error: answerUpdateError } = await d1
+        .from("buzzer_answers")
+        .update({ score_awarded: nextScoreAwarded })
+        .eq("id", item.answer.id);
+
+      if (answerUpdateError) {
+        throw new Error(answerUpdateError.message);
+      }
+    }
+  }
+
+  return scoreByPlayerId;
 }
 
 async function updatePendingBuzzerAnswer(params: {
@@ -2600,7 +2707,12 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error("请先判定最早提交的待判定抢答。");
   }
 
+  if (!isBuzzerAnswerReadyForJudging(firstPendingAnswer)) {
+    throw new Error("请稍等片刻，正在等待可能更早提交的抢答到达。");
+  }
+
   let scoreAwarded = 0;
+  const judgedAt = new Date().toISOString();
 
   if (params.isCorrect) {
     if (currentSession.gameMode === "ROUND_REVEAL") {
@@ -2660,7 +2772,7 @@ export async function judgeBuzzerAnswer(params: {
     .update({
       status: params.isCorrect ? "correct" : "wrong",
       score_awarded: scoreAwarded,
-      judged_at: new Date().toISOString(),
+      judged_at: judgedAt,
       judged_by_player_id: params.presenterPlayerId,
     })
     .eq("id", firstPendingAnswer.id)
@@ -2670,13 +2782,20 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error(updateError.message);
   }
 
+  if (params.isCorrect && currentSession.gameMode === "BUZZER_RANKED") {
+    const rankedScoreByPlayerId = await recalculateRankedBuzzerScores({
+      gameSession: currentGameSession,
+    });
+    scoreAwarded = rankedScoreByPlayerId.get(firstPendingAnswer.player_id) ?? scoreAwarded;
+  }
+
   return {
     gameSession: currentSession,
     judgedAnswer: {
       ...toBuzzerAnswer(firstPendingAnswer),
       status: params.isCorrect ? "correct" as const : "wrong" as const,
       scoreAwarded,
-      judgedAt: new Date().toISOString(),
+      judgedAt,
       judgedByPlayerId: params.presenterPlayerId,
     },
   };

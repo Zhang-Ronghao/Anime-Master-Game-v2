@@ -57,6 +57,7 @@ const LANDSCAPE_GRID_COLUMNS = 9;
 const PORTRAIT_GRID_COLUMNS = 5;
 const TOTAL_BLOCKS = 45;
 const DEFAULT_ROUND_SECONDS = 60;
+const BUZZER_JUDGING_STABILIZE_MS = 3000;
 const FORFEIT_ANSWER_TEXT = "__FORFEIT__";
 const MAX_IMAGE_AUTO_RETRY_COUNT = 3;
 const IMAGE_RETRY_DELAYS_MS = [800, 1600, 3200] as const;
@@ -125,6 +126,16 @@ function getRemainingSeconds(roundStartedAt?: string | null, roundSeconds = DEFA
 
   const elapsedSeconds = Math.floor((nowMs - new Date(roundStartedAt).getTime()) / 1000);
   return Math.min(roundSeconds, Math.max(0, roundSeconds - elapsedSeconds));
+}
+
+function sortBySubmittedAt<T extends { id: string; submittedAt: string }>(items: T[]) {
+  return [...items].sort(
+    (a, b) => new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime() || a.id.localeCompare(b.id),
+  );
+}
+
+function isBuzzerAnswerReadyForJudging(answer: Pick<BuzzerAnswer, "submittedAt">, nowMs: number) {
+  return nowMs - new Date(answer.submittedAt).getTime() >= BUZZER_JUDGING_STABILIZE_MS;
 }
 
 function getTeamName(team: TeamBattleTeam) {
@@ -281,6 +292,10 @@ function upsertById<T extends { id: string }>(items: T[], item: T) {
   return items.some((currentItem) => currentItem.id === item.id)
     ? items.map((currentItem) => (currentItem.id === item.id ? item : currentItem))
     : [...items, item];
+}
+
+function upsertBySubmittedAt<T extends { id: string; submittedAt: string }>(items: T[], item: T) {
+  return sortBySubmittedAt(upsertById(items, item));
 }
 
 function drawRevealedBlocksOnCanvas(canvas: HTMLCanvasElement, image: HTMLImageElement, revealedBlocks: number[]) {
@@ -457,11 +472,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setQuestionResults(snapshot.questionResults);
 
       if (targetGameSession.gameMode === "ROUND_REVEAL") {
-        setAnswers(snapshot.answers);
-        setBuzzerAnswers(snapshot.buzzerAnswers);
+        setAnswers(sortBySubmittedAt(snapshot.answers));
+        setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
 
         if (isPresenter) {
-          setLabelAnswers(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer)));
+          setLabelAnswers(sortBySubmittedAt(snapshot.labelAnswers.filter((answer) => !isForfeitAnswer(answer))));
           setMyBuzzerAnswer(null);
         } else {
           setLabelAnswers([]);
@@ -480,18 +495,20 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         return;
       }
 
-      setAnswers(snapshot.answers);
-      setBuzzerAnswers(snapshot.buzzerAnswers);
+      setAnswers(sortBySubmittedAt(snapshot.answers));
+      setBuzzerAnswers(sortBySubmittedAt(snapshot.buzzerAnswers));
       setLabelAnswers(
-        snapshot.labelBuzzerAnswers.map((answer) => ({
-          id: answer.id,
-          gameSessionId: answer.gameSessionId,
-          questionIndex: answer.questionIndex,
-          revealRound: answer.revealRound,
-          playerId: answer.playerId,
-          answerText: answer.answerText,
-          submittedAt: answer.submittedAt,
-        })),
+        sortBySubmittedAt(
+          snapshot.labelBuzzerAnswers.map((answer) => ({
+            id: answer.id,
+            gameSessionId: answer.gameSessionId,
+            questionIndex: answer.questionIndex,
+            revealRound: answer.revealRound,
+            playerId: answer.playerId,
+            answerText: answer.answerText,
+            submittedAt: answer.submittedAt,
+          })),
+        ),
       );
       setMyAnswer(isPresenter ? null : snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
@@ -649,9 +666,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             delta.answer.questionIndex === currentGameSession.currentQuestionIndex &&
             delta.answer.revealRound === currentGameSession.currentRevealRound
           ) {
-            setAnswers((currentAnswers) => upsertById(currentAnswers, delta.answer));
+            setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
             if (isPresenter && !isForfeitAnswer(delta.answer)) {
-              setLabelAnswers((currentAnswers) => upsertById(currentAnswers, delta.answer));
+              setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
               showAnswerBubble(delta.answer);
             }
             if (isForfeitAnswer(delta.answer)) {
@@ -687,18 +704,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
             delta.buzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
             delta.buzzerAnswer.revealRound === currentGameSession.currentRevealRound
           ) {
-            setBuzzerAnswers((currentAnswers) => upsertById(currentAnswers, delta.buzzerAnswer));
-            if (isPresenter) {
-              showAnswerBubble({
-                id: delta.buzzerAnswer.id,
-                gameSessionId: delta.buzzerAnswer.gameSessionId,
-                questionIndex: delta.buzzerAnswer.questionIndex,
-                revealRound: delta.buzzerAnswer.revealRound,
-                playerId: delta.buzzerAnswer.playerId,
-                answerText: delta.buzzerAnswer.answerText,
-                submittedAt: delta.buzzerAnswer.submittedAt,
-              });
-            }
+            setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
             if (delta.buzzerAnswer.playerId === playerId) {
               setMyBuzzerAnswer(delta.buzzerAnswer);
             }
@@ -709,7 +715,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
         if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
           applyGameSessionDelta(delta.gameSession);
-          setBuzzerAnswers((currentAnswers) => upsertById(currentAnswers, delta.buzzerAnswer));
+          setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
           if (delta.buzzerAnswer.playerId === playerId) {
             setMyBuzzerAnswer(delta.buzzerAnswer);
           }
@@ -933,8 +939,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
     return scoreByPlayerId;
   }, [questionResults]);
-  const pendingBuzzerAnswers = buzzerAnswers.filter((answer) => answer.status === "pending");
-  const currentBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
+  const pendingBuzzerAnswers = useMemo(
+    () => sortBySubmittedAt(buzzerAnswers.filter((answer) => answer.status === "pending")),
+    [buzzerAnswers],
+  );
+  const firstPendingBuzzerAnswer = pendingBuzzerAnswers[0] ?? null;
+  const currentBuzzerAnswer =
+    firstPendingBuzzerAnswer && isBuzzerAnswerReadyForJudging(firstPendingBuzzerAnswer, getEstimatedServerNowMs())
+      ? firstPendingBuzzerAnswer
+      : null;
+  const isWaitingForBuzzerQueueStability = Boolean(firstPendingBuzzerAnswer && !currentBuzzerAnswer);
   const currentPlayerBuzzerStatus = myBuzzerAnswer?.status ?? null;
   const myHasForfeited = isForfeitAnswer(myAnswer);
   const allActiveGuessersUsedBuzzerChance =
@@ -1574,7 +1588,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       setMyAnswer(submitted);
       setAnswerText(submitted.answerText);
-      setAnswers((currentAnswers) => upsertById(currentAnswers, submitted));
+      setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交答案失败。");
     } finally {
@@ -1596,7 +1610,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setMyAnswer(submitted);
       setMyBuzzerAnswer(null);
       setAnswerText("");
-      setAnswers((currentAnswers) => upsertById(currentAnswers, submitted));
+      setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
       setBuzzerAnswers((currentAnswers) =>
         currentAnswers.filter(
           (answer) =>
@@ -1653,7 +1667,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       });
       setMyBuzzerAnswer(submitted);
       setAnswerText(submitted.answerText);
-      setBuzzerAnswers((currentAnswers) => upsertById(currentAnswers, submitted));
+      setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, submitted));
     } catch (error) {
       onError(error instanceof Error ? error.message : "提交抢答失败。");
     } finally {
@@ -1684,7 +1698,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         isCorrect,
       });
       applyRoundSnapshotFromResult(judged) || applyGameSession(judged.gameSession);
-      setBuzzerAnswers((currentAnswers) => upsertById(currentAnswers, judged.judgedAnswer));
+      setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, judged.judgedAnswer));
     } catch (error) {
       onError(error instanceof Error ? error.message : "判定答案失败。");
     } finally {
@@ -2476,7 +2490,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                   </div>
                 ) : (
                   <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-[var(--muted)]">
-                    {isBuzzerMode ? "当前没有待判定抢答。" : "当前没有待判定答案。"}
+                    {isWaitingForBuzzerQueueStability
+                      ? "正在等待抢答顺序稳定。"
+                      : isBuzzerMode
+                        ? "当前没有待判定抢答。"
+                        : "当前没有待判定答案。"}
                   </p>
                 )}
               </div>
