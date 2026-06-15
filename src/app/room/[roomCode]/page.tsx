@@ -793,6 +793,7 @@ function GameResultPanel({
         questionSetId: questionSet.id,
         playerId,
         rating: ratingValue,
+        roomId: room.id,
       });
       setQuestionSet(rated);
       setRatingProgress((currentProgress) => {

@@ -1,6 +1,7 @@
 name = "anime-master-game-api"
 main = "worker/index.ts"
 compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "ROOM_OBJECTS"
@@ -21,3 +22,13 @@ ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
 CLOUDINARY_CLOUD_NAME = "dfdfibosf"
 CLOUDINARY_FOLDER = "anime-master-game"
 CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1

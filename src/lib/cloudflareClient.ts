@@ -30,6 +30,7 @@ type TopicState = {
 };
 
 const ACTION_TIMEOUT_MS = 4000;
+const LONG_ACTION_TIMEOUT_MS = 30000;
 const RECONNECT_DELAY_MS = 500;
 const ROOM_TOPIC_PREFIX = "room:";
 
@@ -45,6 +46,7 @@ const MUTATION_NAMES = new Set([
   "confirmRevealBlocks",
   "submitAnswer",
   "submitForfeitAnswer",
+  "autoForfeitExpiredRound",
   "cancelForfeitAnswer",
   "submitBuzzerAnswer",
   "judgeBuzzerAnswer",
@@ -64,7 +66,9 @@ const MUTATION_NAMES = new Set([
   "returnRoomToLobby",
 ]);
 
+const LONG_ACTION_NAMES = new Set(["createUploadedQuestionSet", "createQuestionSetFromUrlText"]);
 const topicStates = new Map<string, TopicState>();
+const gameSessionTopics = new Map<string, string>();
 
 function apiBase() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -102,9 +106,20 @@ function inferActionTopic(name: string, args: unknown[]) {
         return roomTopic;
       }
     }
+
+    if (typeof first.gameSessionId === "string" && first.gameSessionId.trim()) {
+      const roomTopic = gameSessionTopics.get(first.gameSessionId);
+      if (roomTopic && topicStates.has(roomTopic)) {
+        return roomTopic;
+      }
+    }
   }
 
-  return Array.from(topicStates.keys()).find((topic) => topic.startsWith(ROOM_TOPIC_PREFIX)) ?? null;
+  return null;
+}
+
+function getActionTimeoutMs(name: string) {
+  return LONG_ACTION_NAMES.has(name) ? LONG_ACTION_TIMEOUT_MS : ACTION_TIMEOUT_MS;
 }
 
 function getTopicState(topic: string) {
@@ -236,6 +251,7 @@ async function httpRpc<T>(name: string, args: unknown[]) {
 async function wsAction<T>(topic: string, name: string, args: unknown[]) {
   const state = getTopicState(topic);
   const socket = await waitForSocketOpen(topic, ensureSocket(topic));
+  const timeoutMs = getActionTimeoutMs(name);
 
   const clientActionId =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -246,7 +262,7 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
     const timer = window.setTimeout(() => {
       state.pending.delete(clientActionId);
       reject(new Error("实时操作响应超时，请检查网络后重试。"));
-    }, ACTION_TIMEOUT_MS);
+    }, timeoutMs);
 
     state.pending.set(clientActionId, {
       resolve: resolve as (value: unknown) => void,
@@ -284,6 +300,27 @@ export function subscribeRealtimeTopic(topic: string, listener: (message: Change
       }
       state.socket?.close(1000, "No listeners.");
       state.socket = null;
+      topicStates.delete(topic);
+
+      for (const [gameSessionId, mappedTopic] of gameSessionTopics.entries()) {
+        if (mappedTopic === topic) {
+          gameSessionTopics.delete(gameSessionId);
+        }
+      }
+    }
+  };
+}
+
+export function bindGameSessionRealtimeTopic(gameSessionId: string | null | undefined, topic: string | null | undefined) {
+  if (!gameSessionId || !topic) {
+    return () => undefined;
+  }
+
+  gameSessionTopics.set(gameSessionId, topic);
+
+  return () => {
+    if (gameSessionTopics.get(gameSessionId) === topic) {
+      gameSessionTopics.delete(gameSessionId);
     }
   };
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/Button";
-import { subscribeRealtimeTopic } from "@/lib/cloudflareClient";
+import { bindGameSessionRealtimeTopic, subscribeRealtimeTopic } from "@/lib/cloudflareClient";
 import {
   advanceReviewedQuestion,
   autoForfeitExpiredRound,
@@ -744,6 +744,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       }
     });
   }, [applyRoundSnapshot, isPresenter, onError, onRoomUpdated, playerId, refreshRoundData, room.currentGameId, room.id, showAnswerBubble]);
+
+  useEffect(() => {
+    if (!room.id || !room.currentGameId) {
+      return;
+    }
+
+    return bindGameSessionRealtimeTopic(room.currentGameId, `room:${room.id}`);
+  }, [room.currentGameId, room.id]);
 
   useEffect(() => {
     setAnswerBubbles({});
@@ -1949,6 +1957,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         playerId,
         title: resultPublishTitle.trim(),
         description: resultPublishDescription.trim(),
+        roomId: room.id,
       });
       closeResultPublishPrompt();
       await continueAfterResultPublishPrompt(nextAction);

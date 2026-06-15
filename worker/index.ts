@@ -42,6 +42,7 @@ type CloudinaryResource = {
 };
 
 const ACTION_RESULT_TTL_MS = 10_000;
+const ACTION_CACHE_MIN_ALARM_DELAY_MS = 100;
 
 const MUTATION_NAMES = new Set([
   "createRoom",
@@ -167,8 +168,11 @@ function getRoomObject(env: Env, topic: string) {
   return env.ROOM_OBJECTS.get(env.ROOM_OBJECTS.idFromName(topic));
 }
 
-async function callGameFunction(env: Env, name: string, args: unknown[]) {
-  gameService.bindGameDatabase(env.DB);
+async function runWithGameDatabase<T>(env: Env, callback: () => Promise<T>) {
+  return await gameService.runWithGameDatabase(env.DB, callback);
+}
+
+async function callGameFunction(name: string, args: unknown[]) {
   return await getExportedFunction(name)(...(args ?? []));
 }
 
@@ -388,29 +392,32 @@ async function handleRpc(request: Request, env: Env) {
   const body = (await request.json()) as RpcBody;
   const name = body.name ?? "";
   const args = body.args ?? [];
-  const result = await callGameFunction(env, name, args);
-  const roundSnapshot = await getRoundSnapshotForMutation(name, result);
-  const responseResult = attachRoundSnapshot(result, roundSnapshot);
 
-  if (MUTATION_NAMES.has(name)) {
-    const topic = await getRoomTopicForBroadcast(name, args, responseResult);
-    if (topic) {
-      const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
-      await broadcast(env, {
-        type: "change",
-        name,
-        result: responseResult,
-        args,
-        topic,
-        clientActionId: body.clientActionId,
-        delta: deltas[0],
-        deltas,
-        roundSnapshot: roundSnapshot ?? undefined,
-      });
+  return await runWithGameDatabase(env, async () => {
+    const result = await callGameFunction(name, args);
+    const roundSnapshot = await getRoundSnapshotForMutation(name, result);
+    const responseResult = attachRoundSnapshot(result, roundSnapshot);
+
+    if (MUTATION_NAMES.has(name)) {
+      const topic = await getRoomTopicForBroadcast(name, args, responseResult);
+      if (topic) {
+        const deltas = buildRealtimeDeltas(name, args, responseResult, roundSnapshot);
+        await broadcast(env, {
+          type: "change",
+          name,
+          result: responseResult,
+          args,
+          topic,
+          clientActionId: body.clientActionId,
+          delta: deltas[0],
+          deltas,
+          roundSnapshot: roundSnapshot ?? undefined,
+        });
+      }
     }
-  }
 
-  return json({ data: responseResult }, {}, request, env);
+    return json({ data: responseResult }, {}, request, env);
+  });
 }
 
 async function handleCloudinaryImages(request: Request, env: Env) {
@@ -523,26 +530,34 @@ export class RoomDurableObject {
         return;
       }
 
-      const result = await callGameFunction(this.env, payload.name, payload.args ?? []);
-      const roundSnapshot = await getRoundSnapshotForMutation(payload.name, result);
-      const responseResult = attachRoundSnapshot(result, roundSnapshot);
+      const { roundSnapshot, responseResult } = await runWithGameDatabase(this.env, async () => {
+        const result = await callGameFunction(payload.name ?? "", payload.args ?? []);
+        const nextRoundSnapshot = await getRoundSnapshotForMutation(payload.name ?? "", result);
+        const nextResponseResult = attachRoundSnapshot(result, nextRoundSnapshot);
+
+        return {
+          roundSnapshot: nextRoundSnapshot,
+          responseResult: nextResponseResult,
+        };
+      });
       if (actionKey) {
         this.recentActions.set(actionKey, { expiresAt: Date.now() + ACTION_RESULT_TTL_MS, result: responseResult });
+        await this.scheduleActionCacheCleanup();
       }
 
       if (MUTATION_NAMES.has(payload.name)) {
         const deltas = buildRealtimeDeltas(payload.name, payload.args ?? [], responseResult, roundSnapshot);
         this.broadcast(
           JSON.stringify({
-          type: "change",
-          name: payload.name,
-          result: responseResult,
-          args: payload.args ?? [],
+            type: "change",
+            name: payload.name,
+            result: responseResult,
+            args: payload.args ?? [],
             topic: "",
-          clientActionId: payload.clientActionId,
+            clientActionId: payload.clientActionId,
             delta: deltas[0],
             deltas,
-          roundSnapshot: roundSnapshot ?? undefined,
+            roundSnapshot: roundSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }
@@ -560,12 +575,32 @@ export class RoomDurableObject {
   }
 
   async alarm(): Promise<void> {
-    const now = Date.now();
+    await this.scheduleActionCacheCleanup();
+  }
+
+  private cleanupRecentActions(now = Date.now()) {
+    let nextExpiresAt: number | null = null;
+
     for (const [key, entry] of this.recentActions.entries()) {
       if (entry.expiresAt <= now) {
         this.recentActions.delete(key);
+      } else {
+        nextExpiresAt = nextExpiresAt == null ? entry.expiresAt : Math.min(nextExpiresAt, entry.expiresAt);
       }
     }
+
+    return nextExpiresAt;
+  }
+
+  private async scheduleActionCacheCleanup() {
+    const nextExpiresAt = this.cleanupRecentActions();
+
+    if (nextExpiresAt == null) {
+      await this.state.storage.deleteAlarm();
+      return;
+    }
+
+    await this.state.storage.setAlarm(Math.max(nextExpiresAt, Date.now() + ACTION_CACHE_MIN_ALARM_DELAY_MS));
   }
 
   private broadcast(message: string) {

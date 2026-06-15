@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRoomCode } from "../src/lib/id";
 import { createD1QueryClient } from "./d1QueryCompat";
 import type {
@@ -28,10 +29,25 @@ import type {
   TeamBattleTeam,
 } from "../src/types/game";
 
-let d1 = createD1QueryClient(null);
+type D1QueryClient = ReturnType<typeof createD1QueryClient>;
 
-export function bindGameDatabase(db: D1Database) {
-  d1 = createD1QueryClient(db);
+const d1Context = new AsyncLocalStorage<D1QueryClient>();
+const unboundD1 = createD1QueryClient(null);
+const d1: D1QueryClient = {
+  hasDatabase() {
+    return getD1().hasDatabase();
+  },
+  from(table: string) {
+    return getD1().from(table);
+  },
+};
+
+function getD1() {
+  return d1Context.getStore() ?? unboundD1;
+}
+
+export function runWithGameDatabase<T>(db: D1Database, callback: () => Promise<T>) {
+  return d1Context.run(createD1QueryClient(db), callback);
 }
 
 function assertD1Env() {
@@ -2185,11 +2201,12 @@ async function revealQuestionForReview(gameSessionId: string) {
 async function forfeitMissingRoundActions(
   currentGameSession: DbGameSession,
   currentSession: GameSession,
-  roundActionState = await getRoundActionState(currentSession),
+  roundActionState?: Awaited<ReturnType<typeof getRoundActionState>>,
 ) {
+  const resolvedRoundActionState = roundActionState ?? await getRoundActionState(currentSession);
   const now = new Date().toISOString();
-  const missingGuesserIds = roundActionState.eligibleGuesserIds.filter(
-    (guesserId) => !roundActionState.hasPlayerActed(guesserId),
+  const missingGuesserIds = resolvedRoundActionState.eligibleGuesserIds.filter(
+    (guesserId) => !resolvedRoundActionState.hasPlayerActed(guesserId),
   );
 
   for (const guesserId of missingGuesserIds) {

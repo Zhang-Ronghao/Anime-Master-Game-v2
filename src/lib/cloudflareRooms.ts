@@ -243,9 +243,10 @@ export const publishQuestionSetToCommunity = (params: {
   playerId: string;
   title: string;
   description?: string;
+  roomId?: string;
 }) => rpc<QuestionSet>("publishQuestionSetToCommunity", params);
 
-export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number }) =>
+export const rateCommunityQuestionSet = (params: { questionSetId: string; playerId: string; rating: number; roomId?: string }) =>
   rpc<QuestionSet>("rateCommunityQuestionSet", params);
 
 export const getQuestionSetRatingProgress = (params: { questionSetId: string; playerIds: string[]; playerId?: string }) =>
