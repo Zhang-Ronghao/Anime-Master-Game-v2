@@ -1418,18 +1418,10 @@ export async function confirmRevealBlocks(params: {
     throw new Error("请至少选择一个尚未揭露的方块。");
   }
 
-  const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
-  const isSettledBetweenRounds = !roundStartedAt && revealedBlocks.length > 0 && revealedBlocks.length < REVEAL_BLOCK_COUNT;
-  const nextRevealRound =
-    isSettledBetweenRounds
-      ? Math.min(maxRevealRounds, currentGameSession.current_reveal_round + 1)
-      : currentGameSession.current_reveal_round;
-
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
       revealed_blocks: nextBlocks,
-      current_reveal_round: nextRevealRound,
       round_started_at: new Date().toISOString(),
     })
     .eq("id", params.gameSessionId)
@@ -2224,9 +2216,12 @@ async function forfeitMissingRoundActions(
 }
 
 async function settleRevealRoundForNextSelection(currentGameSession: DbGameSession) {
+  const maxRevealRounds = currentGameSession.max_reveal_rounds ?? 3;
+
   const { data: updatedGameSession, error } = await d1
     .from("game_sessions")
     .update({
+      current_reveal_round: Math.min(maxRevealRounds, currentGameSession.current_reveal_round + 1),
       round_started_at: null,
     })
     .eq("id", currentGameSession.id)

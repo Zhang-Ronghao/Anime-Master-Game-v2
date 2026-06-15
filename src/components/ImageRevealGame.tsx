@@ -876,9 +876,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
-  const isPreparingNextRevealRound =
-    !hasRoundStarted && revealedBlockSet.size > 0 && revealedBlockSet.size < TOTAL_BLOCKS && currentRound < maxRevealRounds;
-  const displayRound = isPreparingNextRevealRound ? currentRound + 1 : currentRound;
+  const displayRound = currentRound;
   const displayScore =
     gameSession?.roundScores[displayRound - 1] ?? Math.max(1, maxRevealRounds - displayRound + 1);
   const isQuestionReviewing = isTeamBattleMode
