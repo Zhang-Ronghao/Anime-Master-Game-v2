@@ -342,7 +342,75 @@ function isForfeitAnswer(answer: Pick<DbAnswer, "answer_text"> | Pick<Answer, "a
 }
 
 function canUseForfeitAnswer(gameMode: GameMode) {
-  return gameMode === "ROUND_REVEAL" || gameMode === "BUZZER_RANKED";
+  return gameMode !== "TEAM_BATTLE";
+}
+
+async function getRoundActionState(gameSession: GameSession) {
+  const [
+    { data: players, error: playersError },
+    { data: questionResults, error: resultsError },
+    { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
+    { data: currentRoundAnswers, error: answersError },
+  ] = await Promise.all([
+    d1.from("players").select("id").eq("room_id", gameSession.roomId).returns<Pick<DbPlayer, "id">[]>(),
+    d1
+      .from("question_results")
+      .select("player_id")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .returns<Pick<DbQuestionResult, "player_id">[]>(),
+    d1
+      .from("buzzer_answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .eq("reveal_round", gameSession.currentRevealRound)
+      .returns<DbBuzzerAnswer[]>(),
+    d1
+      .from("answers")
+      .select("*")
+      .eq("game_session_id", gameSession.id)
+      .eq("question_index", gameSession.currentQuestionIndex)
+      .eq("reveal_round", gameSession.currentRevealRound)
+      .returns<DbAnswer[]>(),
+  ]);
+
+  if (playersError) {
+    throw new Error(playersError.message);
+  }
+  if (resultsError) {
+    throw new Error(resultsError.message);
+  }
+  if (buzzerAnswersError) {
+    throw new Error(buzzerAnswersError.message);
+  }
+  if (answersError) {
+    throw new Error(answersError.message);
+  }
+
+  const guesserIds = (players ?? []).filter((player) => player.id !== gameSession.presenterPlayerId).map((player) => player.id);
+  const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
+  const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
+  const buzzerAnswerByPlayerId = new Map((currentRoundBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const answerByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
+  const hasPlayerActed = (guesserId: string) =>
+    gameSession.gameMode === "ROUND_REVEAL"
+      ? answerByPlayerId.has(guesserId)
+      : answerByPlayerId.has(guesserId) || buzzerAnswerByPlayerId.has(guesserId);
+
+  return {
+    guesserIds,
+    correctSet,
+    eligibleGuesserIds,
+    currentRoundBuzzerAnswers: currentRoundBuzzerAnswers ?? [],
+    currentRoundAnswers: currentRoundAnswers ?? [],
+    buzzerAnswerByPlayerId,
+    answerByPlayerId,
+    hasPendingAnswers: (currentRoundBuzzerAnswers ?? []).some((answer) => answer.status === "pending"),
+    allEligiblePlayersUsedChance:
+      eligibleGuesserIds.length === 0 || eligibleGuesserIds.every((guesserId) => hasPlayerActed(guesserId)),
+    hasPlayerActed,
+  };
 }
 
 async function areAllGuessersCorrectForQuestion(params: {
@@ -2032,78 +2100,53 @@ async function settleBuzzerRoundFromDb(currentGameSession: DbGameSession) {
     roundStartedAt && Date.now() - new Date(roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
   );
 
-  const [
-    { data: players, error: playersError },
-    { data: questionResults, error: resultsError },
-    { data: currentRoundBuzzerAnswers, error: buzzerAnswersError },
-    { data: currentRoundAnswers, error: answersError },
-  ] = await Promise.all([
-      d1.from("players").select("*").eq("room_id", currentGameSession.room_id).returns<DbPlayer[]>(),
-      d1
-        .from("question_results")
-        .select("*")
-        .eq("game_session_id", currentGameSession.id)
-        .eq("question_index", questionIndex)
-        .returns<DbQuestionResult[]>(),
-      d1
-        .from("buzzer_answers")
-        .select("*")
-        .eq("game_session_id", currentGameSession.id)
-        .eq("question_index", questionIndex)
-        .eq("reveal_round", currentRound)
-        .returns<DbBuzzerAnswer[]>(),
-      d1
-        .from("answers")
-        .select("*")
-        .eq("game_session_id", currentGameSession.id)
-        .eq("question_index", questionIndex)
-        .eq("reveal_round", currentRound)
-        .returns<DbAnswer[]>(),
-    ]);
+  let roundActionState = await getRoundActionState(currentSession);
 
-  if (playersError) {
-    throw new Error(playersError.message);
-  }
-
-  if (resultsError) {
-    throw new Error(resultsError.message);
-  }
-
-  if (buzzerAnswersError) {
-    throw new Error(buzzerAnswersError.message);
-  }
-
-  if (answersError) {
-    throw new Error(answersError.message);
-  }
-
-  const guesserIds = (players ?? [])
-    .filter((player) => player.id !== currentGameSession.presenter_player_id)
-    .map((player) => player.id);
-  const correctSet = new Set((questionResults ?? []).map((result) => result.player_id));
-  const eligibleGuesserIds = guesserIds.filter((guesserId) => !correctSet.has(guesserId));
-  const buzzerAnswerByPlayerId = new Map((currentRoundBuzzerAnswers ?? []).map((answer) => [answer.player_id, answer]));
-  const roundRevealSubmissionByPlayerId = new Map((currentRoundAnswers ?? []).map((answer) => [answer.player_id, answer]));
-  const hasPendingAnswers = (currentRoundBuzzerAnswers ?? []).some((answer) => answer.status === "pending");
-  const allEligiblePlayersUsedChance =
-    eligibleGuesserIds.length === 0 ||
-    eligibleGuesserIds.every((guesserId) =>
-      currentSession.gameMode === "ROUND_REVEAL"
-        ? roundRevealSubmissionByPlayerId.has(guesserId)
-        : buzzerAnswerByPlayerId.has(guesserId),
+  if (roundEnded) {
+    const now = new Date().toISOString();
+    const missingGuesserIds = roundActionState.eligibleGuesserIds.filter(
+      (guesserId) => !roundActionState.hasPlayerActed(guesserId),
     );
-  const hasCorrectAnswer = correctSet.size > 0;
-  const allPlayersCorrect = guesserIds.length > 0 && guesserIds.every((guesserId) => correctSet.has(guesserId));
+
+    for (const guesserId of missingGuesserIds) {
+      const { error } = await d1.from("answers").upsert(
+        {
+          game_session_id: currentGameSession.id,
+          question_index: questionIndex,
+          reveal_round: currentRound,
+          player_id: guesserId,
+          answer_text: FORFEIT_ANSWER_TEXT,
+          submitted_at: now,
+        },
+        {
+          onConflict: "game_session_id,question_index,reveal_round,player_id",
+        },
+      );
+
+      if (error) {
+        throw new Error(error.message);
+      }
+    }
+
+    if (missingGuesserIds.length > 0) {
+      roundActionState = await getRoundActionState(currentSession);
+    }
+  }
+
+  const hasCorrectAnswer = roundActionState.correctSet.size > 0;
+  const allPlayersCorrect =
+    roundActionState.guesserIds.length > 0 &&
+    roundActionState.guesserIds.every((guesserId) => roundActionState.correctSet.has(guesserId));
 
   if (allPlayersCorrect || (currentSession.gameMode === "BUZZER_FIRST_CORRECT" && hasCorrectAnswer)) {
     return revealQuestionForReview(currentGameSession.id);
   }
 
-  if (hasPendingAnswers) {
+  if (roundActionState.hasPendingAnswers) {
     return currentSession;
   }
 
-  const canSettleBecauseAllChancesUsed = currentSession.gameMode !== "BUZZER_RANKED" && allEligiblePlayersUsedChance;
+  const canSettleBecauseAllChancesUsed = roundActionState.allEligiblePlayersUsedChance;
 
   if (roundEnded || canSettleBecauseAllChancesUsed) {
     if (currentRound >= currentSession.maxRevealRounds) {
@@ -2165,6 +2208,11 @@ export async function submitAnswer(params: {
 
   if (existingResult) {
     throw new Error("你已答对本题，不能重复提交答案。");
+  }
+
+  const roundActionState = await getRoundActionState(gameSession);
+  if (roundActionState.allEligiblePlayersUsedChance) {
+    throw new Error("本轮所有玩家都已提交，不能再修改答案。");
   }
 
   const [{ data: existingAnswer, error: answerLoadError }, { data: existingBuzzerAnswer, error: buzzerLoadError }] =
@@ -2246,6 +2294,11 @@ export async function submitForfeitAnswer(params: {
 
   if (Date.now() - new Date(gameSession.roundStartedAt).getTime() >= gameSession.roundSeconds * 1000) {
     throw new Error("本轮答题时间已结束，不能再放弃作答。");
+  }
+
+  const roundActionState = await getRoundActionState(gameSession);
+  if (roundActionState.allEligiblePlayersUsedChance) {
+    throw new Error("本轮所有玩家都已提交，不能再改为放弃作答。");
   }
 
   const { data: existingResult, error: resultError } = await d1
@@ -2357,6 +2410,11 @@ export async function cancelForfeitAnswer(params: {
     throw new Error("本轮答题时间已结束，不能再取消放弃。");
   }
 
+  const roundActionState = await getRoundActionState(gameSession);
+  if (roundActionState.allEligiblePlayersUsedChance) {
+    throw new Error("本轮所有玩家都已提交，不能再取消放弃。");
+  }
+
   const { data: existingAnswer, error: answerLoadError } = await d1
     .from("answers")
     .select("*")
@@ -2450,7 +2508,7 @@ export async function submitBuzzerAnswer(params: {
     throw new Error("你已答对本题，不能重复抢答。");
   }
 
-  if (gameSession.gameMode === "BUZZER_RANKED") {
+  if (canUseForfeitAnswer(gameSession.gameMode)) {
     const { data: existingAnswer, error: answerLoadError } = await d1
       .from("answers")
       .select("*")
@@ -2612,11 +2670,8 @@ export async function judgeBuzzerAnswer(params: {
     throw new Error(updateError.message);
   }
 
-  const nextGameSession =
-    currentSession.gameMode === "ROUND_REVEAL" ? currentSession : await settleBuzzerRoundFromDb(currentGameSession);
-
   return {
-    gameSession: nextGameSession,
+    gameSession: currentSession,
     judgedAnswer: {
       ...toBuzzerAnswer(firstPendingAnswer),
       status: params.isCorrect ? "correct" as const : "wrong" as const,
@@ -2653,15 +2708,6 @@ export async function settleBuzzerRound(params: {
 
   if (currentSession.gameMode === "TEAM_BATTLE") {
     throw new Error("红蓝对抗模式不能使用普通抢答结算。");
-  }
-
-  const roundEnded = Boolean(
-    currentSession.roundStartedAt &&
-      Date.now() - new Date(currentSession.roundStartedAt).getTime() >= currentSession.roundSeconds * 1000,
-  );
-
-  if (!roundEnded && currentSession.gameMode !== "ROUND_REVEAL") {
-    throw new Error("本轮倒计时尚未结束，暂时不能结算抢答。");
   }
 
   const nextGameSession = await settleBuzzerRoundFromDb(currentGameSession);

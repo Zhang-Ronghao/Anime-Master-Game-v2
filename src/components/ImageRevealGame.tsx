@@ -12,7 +12,6 @@ import {
   getGameBootstrapSnapshot,
   getQuestionSetById,
   getRoundSnapshot,
-  gradeAnswersAndAdvance,
   judgeTeamBattleGuess,
   judgeBuzzerAnswer,
   publishQuestionSetToCommunity,
@@ -330,13 +329,11 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [resultPublishDescription, setResultPublishDescription] = useState("");
   const [scores, setScores] = useState<PlayerScore[]>([]);
   const [questionResults, setQuestionResults] = useState<QuestionResult[]>([]);
-  const [selectedCorrectPlayerIds, setSelectedCorrectPlayerIds] = useState<string[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState(DEFAULT_ROUND_SECONDS);
   const [teamBattleClockMs, setTeamBattleClockMs] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirmingReveal, setIsConfirmingReveal] = useState(false);
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
-  const [isGrading, setIsGrading] = useState(false);
   const [isJudgingBuzzer, setIsJudgingBuzzer] = useState(false);
   const [isSettlingBuzzerRound, setIsSettlingBuzzerRound] = useState(false);
   const [isSubmittingTeamBattle, setIsSubmittingTeamBattle] = useState(false);
@@ -346,7 +343,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [isSkippingQuestion, setIsSkippingQuestion] = useState(false);
   const [isSavingLabel, setIsSavingLabel] = useState(false);
   const [isPublishingBeforeResult, setIsPublishingBeforeResult] = useState(false);
-  const [isJudgeModalOpen, setIsJudgeModalOpen] = useState(false);
   const [isLabelModalOpen, setIsLabelModalOpen] = useState(false);
   const [resultPublishQuestionSet, setResultPublishQuestionSet] = useState<QuestionSet | null>(null);
   const [resultPublishNextAction, setResultPublishNextAction] = useState<ResultPublishNextAction | null>(null);
@@ -357,7 +353,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [playerImageRetryAttempt, setPlayerImageRetryAttempt] = useState(0);
   const [playerImageRetryToken, setPlayerImageRetryToken] = useState(0);
-  const [lastAutoJudgeKey, setLastAutoJudgeKey] = useState("");
   const [lastAutoLabelKey, setLastAutoLabelKey] = useState("");
   const [canRenderPortal, setCanRenderPortal] = useState(false);
   const [playerImageCanvas, setPlayerImageCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -437,7 +432,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     setLabelAnswers([]);
     setMyAnswer(null);
     setMyBuzzerAnswer(null);
-    setSelectedCorrectPlayerIds([]);
   }
 
   function applyGameSessionDelta(nextGameSession: GameSession) {
@@ -486,7 +480,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         return;
       }
 
-      setAnswers([]);
+      setAnswers(snapshot.answers);
       setBuzzerAnswers(snapshot.buzzerAnswers);
       setLabelAnswers(
         snapshot.labelBuzzerAnswers.map((answer) => ({
@@ -499,7 +493,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           submittedAt: answer.submittedAt,
         })),
       );
-      setMyAnswer(null);
+      setMyAnswer(isPresenter ? null : snapshot.answers.find((answer) => answer.playerId === playerId) ?? null);
       setMyBuzzerAnswer(isPresenter ? null : snapshot.buzzerAnswers.find((answer) => answer.playerId === playerId) ?? null);
     },
     [isPresenter, playerId],
@@ -630,7 +624,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           applyRoundSnapshot(delta.snapshot);
           setImageLoadFailed(false);
           setSelectedBlocks([]);
-          setSelectedCorrectPlayerIds([]);
           handled = true;
           continue;
         }
@@ -639,7 +632,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
           applyGameSessionDelta(delta.gameSession);
           setImageLoadFailed(false);
           setSelectedBlocks([]);
-          setSelectedCorrectPlayerIds([]);
           handled = true;
           continue;
         }
@@ -874,7 +866,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const isTeamBattleMode = gameSession?.gameMode === "TEAM_BATTLE";
   const teamBattleState = gameSession?.teamBattleState ?? null;
   const isBuzzerMode = Boolean(gameSession && gameSession.gameMode !== "ROUND_REVEAL" && gameSession.gameMode !== "TEAM_BATTLE");
-  const isRankedBuzzerMode = gameSession?.gameMode === "BUZZER_RANKED";
   const hasRoundStarted = Boolean(gameSession?.roundStartedAt);
   const isRoundActive = hasRoundStarted && remainingSeconds > 0;
   const isRoundEnded = hasRoundStarted && remainingSeconds === 0;
@@ -950,6 +941,9 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     activeGuessers.length > 0 && activeGuessers.every((player) => buzzerActionPlayerSet.has(player.id));
   const allActiveGuessersSubmitted =
     activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
+  const allActiveGuessersUsedRoundChance = isBuzzerMode ? allActiveGuessersUsedBuzzerChance : allActiveGuessersSubmitted;
+  const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance;
+  const hasFirstCorrectAnswer = gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0;
   const scoreRows = room.players
     .filter((player) => player.id !== room.currentPresenterPlayerId)
     .map((player) => ({
@@ -1061,24 +1055,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
+    !isRoundClosedForPlayerActions &&
     answerText.trim().length > 0 &&
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canForfeitAnswer =
     !isPresenter &&
-    (!isBuzzerMode || isRankedBuzzerMode) &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
+    !isRoundClosedForPlayerActions &&
     !myHasForfeited &&
     (!myBuzzerAnswer || myBuzzerAnswer.status === "pending");
   const canCancelForfeit =
     !isPresenter &&
-    (!isBuzzerMode || isRankedBuzzerMode) &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
     isRoundActive &&
+    !isRoundClosedForPlayerActions &&
     myHasForfeited;
   const canSubmitBuzzerAnswer =
     !isPresenter &&
@@ -1088,6 +1083,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !myBuzzerAnswer &&
     !myHasForfeited &&
     isRoundActive &&
+    !isRoundClosedForPlayerActions &&
     answerText.trim().length > 0;
   const canTypeBuzzerAnswer =
     !isPresenter &&
@@ -1096,16 +1092,16 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     !isCurrentPlayerCorrect &&
     !myBuzzerAnswer &&
     !myHasForfeited &&
-    isRoundActive;
-  const isStandardRoundSettled = !isTeamBattleMode && !isQuestionReviewing && !hasRoundStarted && revealedBlockSet.size > 0;
-  const canGrade = Boolean(isPresenter && !isTeamBattleMode && !isQuestionReviewing && hasRoundStarted);
+    isRoundActive &&
+    !isRoundClosedForPlayerActions;
   const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
     isPresenter &&
     !isTeamBattleMode &&
     !isQuestionReviewing &&
     pendingBuzzerAnswers.length === 0 &&
-    (isBuzzerMode ? isRoundEnded : isStandardRoundSettled || (hasRoundStarted && (isRoundEnded || allActiveGuessersSubmitted))) &&
+    hasRoundStarted &&
+    (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect) &&
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
   const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
@@ -1150,7 +1146,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
         : `${currentScore} 分`;
-  const standardSubmittedCount = isBuzzerMode ? buzzerActionPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const rawStandardSubmittedCount = isBuzzerMode ? buzzerActionPlayerSet.size : currentRoundAnswerPlayerSet.size;
+  const standardSubmittedCount = isRoundEnded
+    ? Math.max(rawStandardSubmittedCount, activeGuessers.length)
+    : rawStandardSubmittedCount;
   const standardTotalCount = Math.max(activeGuessers.length, standardSubmittedCount);
   const standardProgress = standardTotalCount > 0 ? (standardSubmittedCount / standardTotalCount) * 100 : 0;
   const isBuzzerSettleToReview =
@@ -1164,7 +1163,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     : areAllGuessersCorrect || currentRound >= maxRevealRounds
       ? "公布答案"
       : "进入下一轮";
-  const standardAdvanceActionText = areAllGuessersCorrect || currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
   let standardTaskBadge = isPresenter ? "出题人" : standardModeLabel;
   let standardTaskTitle = "等待开始";
   let standardTaskDetail = "等待出题人揭露图片";
@@ -1180,7 +1178,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         } else if (!hasRoundStarted) {
           standardTaskTitle = "选格揭图";
           standardTaskDetail = selectedBlocks.length > 0 ? `已选 ${selectedBlocks.length} 格` : "先在图片上选格";
-        } else if (isRoundEnded && (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance)) {
+        } else if (canSettleBuzzerRound || allActiveGuessersUsedBuzzerChance || hasFirstCorrectAnswer) {
           standardTaskTitle = buzzerSettleActionText;
           standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已抢答`;
         } else {
@@ -1190,9 +1188,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       } else if (currentBuzzerAnswer) {
         standardTaskTitle = "判定答案";
         standardTaskDetail = getPlayerName(currentBuzzerAnswer.playerId);
-      } else if (isStandardRoundSettled) {
-        standardTaskTitle = standardAdvanceActionText;
-        standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
       } else if (isRoundEnded || allActiveGuessersSubmitted) {
         standardTaskTitle = currentRound >= maxRevealRounds ? "公布答案" : "进入下一轮";
         standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
@@ -1208,11 +1203,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       standardTaskTone = "border-emerald-200 bg-emerald-50";
       standardTaskTitle = "已答对";
       standardTaskDetail = "等待下一题";
-    } else if (isStandardRoundSettled) {
-      standardTaskBadge = "出题人";
-      standardTaskTone = "border-amber-200 bg-amber-50";
-      standardTaskTitle = standardAdvanceActionText;
-      standardTaskDetail = `${standardSubmittedCount}/${standardTotalCount} 已提交`;
     } else if (!hasRoundStarted) {
       standardTaskTitle = "等待揭图";
       standardTaskDetail = "出题人正在选格";
@@ -1220,7 +1210,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       if (myHasForfeited) {
         standardTaskTone = "border-slate-200 bg-white";
         standardTaskTitle = "已放弃";
-        standardTaskDetail = "截止前可取消放弃";
+        standardTaskDetail = isRoundClosedForPlayerActions ? "等待判定" : "截止前可取消放弃";
       } else if (myBuzzerAnswer?.status === "pending") {
         standardTaskTitle = "等待判定";
         standardTaskDetail = `已抢答：${myBuzzerAnswer.answerText}`;
@@ -1228,8 +1218,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         standardTaskTitle = "本轮已答错";
         standardTaskDetail = "等待下一轮";
       } else if (isRoundEnded) {
-        standardTaskTitle = "等待结算";
-        standardTaskDetail = "本轮抢答结束";
+        standardTaskTitle = "已自动放弃";
+        standardTaskDetail = "等待判定";
       } else {
         standardTaskTone = "border-emerald-200 bg-white";
         standardTaskTitle = "提交抢答";
@@ -1241,17 +1231,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     } else if (!isBuzzerMode && myBuzzerAnswer?.status === "wrong") {
       standardTaskTitle = "本轮已答错";
       standardTaskDetail = "等待下一轮";
-    } else if (isRoundEnded) {
-      standardTaskTitle = "等待判定";
-      standardTaskDetail = "本轮已结束";
     } else if (myHasForfeited) {
       standardTaskTone = "border-slate-200 bg-white";
       standardTaskTitle = "已放弃";
-      standardTaskDetail = "截止前可提交答案或取消放弃";
+      standardTaskDetail = isRoundClosedForPlayerActions ? "等待判定" : "截止前可提交答案或取消放弃";
+    } else if (isRoundEnded) {
+      standardTaskTitle = "已自动放弃";
+      standardTaskDetail = "等待判定";
     } else if (myAnswer) {
       standardTaskTone = "border-emerald-200 bg-white";
       standardTaskTitle = "已提交答案";
-      standardTaskDetail = "截止前可修改";
+      standardTaskDetail = isRoundClosedForPlayerActions ? "等待判定" : "截止前可修改";
     } else {
       standardTaskTone = "border-emerald-200 bg-white";
       standardTaskTitle = "输入答案";
@@ -1317,21 +1307,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }, [gameSession?.id]);
 
   useEffect(() => {
-    if (!gameSession || !canGrade || isJudgeModalOpen || isGrading) {
-      return;
-    }
-
-    const shouldAutoOpenJudge = isRoundEnded || allActiveGuessersSubmitted;
-    const autoJudgeKey = `${gameSession.id}:${gameSession.currentQuestionIndex}:${gameSession.currentRevealRound}`;
-
-    if (shouldAutoOpenJudge && lastAutoJudgeKey !== autoJudgeKey) {
-      setIsJudgeModalOpen(true);
-      setLastAutoJudgeKey(autoJudgeKey);
-    }
-  }, [allActiveGuessersSubmitted, canGrade, gameSession, isGrading, isJudgeModalOpen, isRoundEnded, lastAutoJudgeKey]);
-
-  useEffect(() => {
-    if (!gameSession || !canAddQuestionLabel || isJudgeModalOpen || isLabelModalOpen || isLabelPromptDisabledForGame) {
+    if (!gameSession || !canAddQuestionLabel || isLabelModalOpen || isLabelPromptDisabledForGame) {
       return;
     }
 
@@ -1341,7 +1317,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       setIsLabelModalOpen(true);
       setLastAutoLabelKey(autoLabelKey);
     }
-  }, [canAddQuestionLabel, gameSession, isJudgeModalOpen, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
+  }, [canAddQuestionLabel, gameSession, isLabelModalOpen, isLabelPromptDisabledForGame, lastAutoLabelKey]);
 
   useEffect(() => {
     if (!gameSession || !teamBattleState?.voteDeadlineAt || isFinalizingTeamBattle) {
@@ -1467,18 +1443,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       const nextBlocks = [...currentBlocks, blockIndex].sort((a, b) => a - b);
       return nextBlocks;
     });
-  }
-
-  function toggleCorrectPlayer(targetPlayerId: string) {
-    if (correctPlayerSet.has(targetPlayerId)) {
-      return;
-    }
-
-    setSelectedCorrectPlayerIds((currentIds) =>
-      currentIds.includes(targetPlayerId)
-        ? currentIds.filter((id) => id !== targetPlayerId)
-        : [...currentIds, targetPlayerId],
-    );
   }
 
   async function handleConfirmReveal() {
@@ -1747,35 +1711,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     }
   }
 
-  async function handleGradeAnswers() {
-    if (!gameSession) {
-      return;
-    }
-
-    setIsGrading(true);
-    try {
-      const graded = await gradeAnswersAndAdvance({
-        gameSessionId: gameSession.id,
-        presenterPlayerId: playerId,
-        correctPlayerIds: selectedCorrectPlayerIds,
-      });
-      applyRoundSnapshotFromResult(graded) || applyGameSession(graded.gameSession);
-      setImageLoadFailed(false);
-      setSelectedCorrectPlayerIds([]);
-      setSelectedBlocks([]);
-
-      if (graded.room) {
-        onRoomUpdated?.(graded.room);
-      }
-
-      setIsJudgeModalOpen(false);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "确认判分失败。");
-    } finally {
-      setIsGrading(false);
-    }
-  }
-
   async function performSkipQuestion() {
     if (!gameSession) {
       return;
@@ -1788,7 +1723,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     applyRoundSnapshotFromResult(skipped) || applyGameSession(skipped.gameSession);
     setImageLoadFailed(false);
     setSelectedBlocks([]);
-    setSelectedCorrectPlayerIds([]);
 
     if (skipped.room) {
       onRoomUpdated?.(skipped.room);
@@ -1855,7 +1789,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     applyRoundSnapshotFromResult(advanced) || applyGameSession(advanced.gameSession);
     setImageLoadFailed(false);
     setSelectedBlocks([]);
-    setSelectedCorrectPlayerIds([]);
 
     if (advanced.room) {
       onRoomUpdated?.(advanced.room);
@@ -2624,6 +2557,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                     disabled={
                       !isRoundActive ||
+                      isRoundClosedForPlayerActions ||
                       (isBuzzerMode && Boolean(myBuzzerAnswer)) ||
                       (isBuzzerMode && myHasForfeited) ||
                       (!isBuzzerMode && myBuzzerAnswer?.status === "wrong")
@@ -2651,7 +2585,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                           ? "修改答案"
                           : "提交答案"}
                 </Button>
-                {!isBuzzerMode || isRankedBuzzerMode ? (
+                {!isTeamBattleMode ? (
                   <Button
                     className="w-full"
                     type="button"
@@ -2668,9 +2602,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                       ? "本轮已放弃"
                       : myBuzzerAnswer
                       ? `本轮已抢答：${myBuzzerAnswer.answerText}`
+                      : isRoundEnded
+                      ? "本轮已自动放弃"
                       : "本轮尚未抢答"
                     : myBuzzerAnswer?.status === "wrong"
                       ? `本轮已答错：${myBuzzerAnswer.answerText}`
+                    : isRoundEnded && !myAnswer
+                      ? "本轮已自动放弃"
                     : myAnswer
                       ? getAnswerDisplayText(myAnswer)
                       : "本轮尚未提交答案"}
@@ -2949,65 +2887,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       ) : null}
 
-      {isJudgeModalOpen ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6">
-          <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-2xl">
-            <div className="flex flex-col justify-between gap-3 border-b border-[var(--line)] px-5 py-4 sm:flex-row sm:items-center">
-              <div>
-                <p className="text-lg font-semibold text-slate-950">本轮答案与判分</p>
-                <p className="mt-1 text-sm text-[var(--muted)]">
-                  可以随时勾选答对玩家并确认判分。未勾选也可以确认，用于进入下一轮。
-                </p>
-              </div>
-              <button
-                className="self-start rounded-md border border-[var(--line)] px-3 py-2 text-sm font-semibold hover:bg-slate-50"
-                type="button"
-                onClick={() => setIsJudgeModalOpen(false)}
-              >
-                关闭
-              </button>
-            </div>
-
-            <div className="max-h-[60vh] space-y-2 overflow-y-auto px-5 py-4">
-              {guessers.map((player) => {
-                const answer = answers.find((item) => item.playerId === player.id);
-                const alreadyCorrect = correctPlayerSet.has(player.id);
-
-                return (
-                  <label
-                    className="flex items-start gap-3 rounded-md border border-[var(--line)] bg-slate-50 p-3 text-sm"
-                    key={player.id}
-                  >
-                    <input
-                      className="mt-1"
-                      type="checkbox"
-                      checked={alreadyCorrect || selectedCorrectPlayerIds.includes(player.id)}
-                      disabled={alreadyCorrect || !hasRoundStarted}
-                      onChange={() => toggleCorrectPlayer(player.id)}
-                    />
-                    <span>
-                      <span className="block font-semibold text-slate-950">
-                        {player.nickname}
-                        {alreadyCorrect ? "（已答对）" : ""}
-                      </span>
-                      <span className="mt-1 block text-[var(--muted)]">{answer ? getAnswerDisplayText(answer) : "本轮未提交"}</span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-
-            <div className="flex flex-col justify-between gap-3 border-t border-[var(--line)] bg-slate-50 px-5 py-4 sm:flex-row sm:items-center">
-              <p className="text-sm text-[var(--muted)]">
-                已选择 {selectedCorrectPlayerIds.length} 名玩家，本轮分值 {currentScore} 分。
-              </p>
-          <Button type="button" onClick={handleGradeAnswers} disabled={!canGrade || isGrading}>
-                {isGrading ? "判分中..." : "确认判分"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
