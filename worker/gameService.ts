@@ -417,6 +417,22 @@ async function getRoundActionState(gameSession: GameSession) {
   };
 }
 
+async function hasCorrectResultForCurrentQuestion(gameSession: GameSession) {
+  const { data, error } = await d1
+    .from("question_results")
+    .select("id")
+    .eq("game_session_id", gameSession.id)
+    .eq("question_index", gameSession.currentQuestionIndex)
+    .limit(1)
+    .maybeSingle<{ id: string }>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return Boolean(data);
+}
+
 async function areAllGuessersCorrectForQuestion(params: {
   roomId: string;
   gameSessionId: string;
@@ -2615,6 +2631,10 @@ export async function submitBuzzerAnswer(params: {
     throw new Error("你已答对本题，不能重复抢答。");
   }
 
+  if (gameSession.gameMode === "BUZZER_FIRST_CORRECT" && await hasCorrectResultForCurrentQuestion(gameSession)) {
+    throw new Error("本题已有玩家答对，不能继续抢答。");
+  }
+
   if (canUseForfeitAnswer(gameSession.gameMode)) {
     const { data: existingAnswer, error: answerLoadError } = await d1
       .from("answers")
@@ -2720,6 +2740,10 @@ export async function judgeBuzzerAnswer(params: {
         currentSession.roundScores[currentSession.currentRevealRound - 1] ??
         Math.max(1, currentSession.maxRevealRounds - currentSession.currentRevealRound + 1);
     } else if (currentSession.gameMode === "BUZZER_FIRST_CORRECT") {
+      if (await hasCorrectResultForCurrentQuestion(currentSession)) {
+        throw new Error("本题已有首个答对玩家，不能继续判为答对。");
+      }
+
       scoreAwarded = 1;
     } else {
       const [{ data: players, error: playersError }, { data: existingResults, error: resultsError }] = await Promise.all([
@@ -2789,8 +2813,13 @@ export async function judgeBuzzerAnswer(params: {
     scoreAwarded = rankedScoreByPlayerId.get(firstPendingAnswer.player_id) ?? scoreAwarded;
   }
 
+  const nextGameSession =
+    params.isCorrect && currentSession.gameMode === "BUZZER_FIRST_CORRECT"
+      ? await revealQuestionForReview(currentGameSession.id)
+      : currentSession;
+
   return {
-    gameSession: currentSession,
+    gameSession: nextGameSession,
     judgedAnswer: {
       ...toBuzzerAnswer(firstPendingAnswer),
       status: params.isCorrect ? "correct" as const : "wrong" as const,

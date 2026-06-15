@@ -376,6 +376,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const scoreRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gameSessionRef = useRef<GameSession | null>(null);
   const answerInputRef = useRef<HTMLInputElement | null>(null);
+  const teamGuessInputRef = useRef<HTMLInputElement | null>(null);
   const serverClockRef = useRef<{ serverNowMs: number; clientNowMs: number } | null>(null);
 
   const setPlayerImageCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
@@ -956,8 +957,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const allActiveGuessersSubmitted =
     activeGuessers.length > 0 && activeGuessers.every((player) => currentRoundAnswerPlayerSet.has(player.id));
   const allActiveGuessersUsedRoundChance = isBuzzerMode ? allActiveGuessersUsedBuzzerChance : allActiveGuessersSubmitted;
-  const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance;
   const hasFirstCorrectAnswer = gameSession?.gameMode === "BUZZER_FIRST_CORRECT" && correctPlayerSet.size > 0;
+  const isRoundClosedForPlayerActions = isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer;
   const scoreRows = room.players
     .filter((player) => player.id !== room.currentPresenterPlayerId)
     .map((player) => ({
@@ -1099,15 +1100,18 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     isRoundActive &&
     !isRoundClosedForPlayerActions &&
     answerText.trim().length > 0;
-  const canTypeBuzzerAnswer =
+  const canTypeAnswer =
     !isPresenter &&
-    isBuzzerMode &&
+    !isTeamBattleMode &&
     !isQuestionReviewing &&
     !isCurrentPlayerCorrect &&
-    !myBuzzerAnswer &&
-    !myHasForfeited &&
     isRoundActive &&
-    !isRoundClosedForPlayerActions;
+    !isRoundClosedForPlayerActions &&
+    !(isBuzzerMode && Boolean(myBuzzerAnswer)) &&
+    !(isBuzzerMode && myHasForfeited) &&
+    !(!isBuzzerMode && myBuzzerAnswer?.status === "wrong");
+  const canTypeTeamBattleGuess =
+    teamBattleCanAct && teamBattleState?.phase === "GUESS_VOTE" && !teamBattleIsVoteClosed;
   const canJudgeBuzzer = isPresenter && !isTeamBattleMode && !isQuestionReviewing && Boolean(currentBuzzerAnswer) && Boolean(gameSession);
   const canSettleBuzzerRound =
     isPresenter &&
@@ -1118,13 +1122,14 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     (isRoundEnded || allActiveGuessersUsedRoundChance || hasFirstCorrectAnswer || areAllGuessersCorrect) &&
     Boolean(gameSession);
   const canAddQuestionLabel = isPresenter && isQuestionReviewing && Boolean(gameSession) && Boolean(currentQuestion) && !currentQuestionLabel;
-  const canPreviewSelectedBlocks = isPresenter && !isTeamBattleMode && !imageLoadFailed && selectedBlocks.length > 0;
+  const canPreviewPresenterPlayerView = isPresenter && !isTeamBattleMode && Boolean(currentQuestion) && !imageLoadFailed;
+  const canPreviewSelectedBlocks = canPreviewPresenterPlayerView && selectedBlocks.length > 0;
   const canPreviewTeamBattleOriginal =
-    isPresenter && isTeamBattleMode && Boolean(teamBattleState) && !isQuestionReviewing && !imageLoadFailed;
-  const canHoldRevealPreview = canPreviewSelectedBlocks || canPreviewTeamBattleOriginal;
+    isPresenter && isTeamBattleMode && Boolean(teamBattleState) && Boolean(currentQuestion) && !isQuestionReviewing && !imageLoadFailed;
+  const canHoldRevealPreview = canPreviewPresenterPlayerView || canPreviewTeamBattleOriginal;
 
   useEffect(() => {
-    if (!canTypeBuzzerAnswer || !gameSession?.roundStartedAt) {
+    if (!canTypeAnswer || !gameSession?.roundStartedAt) {
       return;
     }
 
@@ -1135,10 +1140,28 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
     return () => window.clearTimeout(focusTimer);
   }, [
-    canTypeBuzzerAnswer,
+    canTypeAnswer,
     gameSession?.currentQuestionIndex,
     gameSession?.currentRevealRound,
     gameSession?.roundStartedAt,
+  ]);
+
+  useEffect(() => {
+    if (!canTypeTeamBattleGuess) {
+      return;
+    }
+
+    const focusTimer = window.setTimeout(() => {
+      teamGuessInputRef.current?.focus();
+      teamGuessInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [
+    canTypeTeamBattleGuess,
+    gameSession?.currentQuestionIndex,
+    teamBattleState?.phase,
+    teamBattleState?.activeTeam,
   ]);
 
   const standardModeLabel =
@@ -1676,12 +1699,17 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   }
 
   function handleAnswerInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key !== "Enter" || !isBuzzerMode || !canSubmitBuzzerAnswer || isSubmittingAnswer) {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+      return;
+    }
+
+    const canSubmitCurrentAnswer = isBuzzerMode ? canSubmitBuzzerAnswer : canSubmitAnswer;
+    if (!canSubmitCurrentAnswer || isSubmittingAnswer) {
       return;
     }
 
     event.preventDefault();
-    void handleSubmitBuzzerAnswer();
+    void (isBuzzerMode ? handleSubmitBuzzerAnswer() : handleSubmitAnswer());
   }
 
   async function handleJudgeBuzzerAnswer(isCorrect: boolean) {
@@ -2339,6 +2367,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     <div className="space-y-2">
                       <p className="text-sm font-semibold text-slate-950">我的答案</p>
                       <input
+                        ref={teamGuessInputRef}
                         className="h-12 w-full rounded-md border border-[var(--line)] bg-white px-3 text-base outline-none transition placeholder:text-slate-400 focus:border-[var(--primary)] focus:ring-4 focus:ring-rose-100"
                         maxLength={80}
                         placeholder="输入答案"
@@ -2418,11 +2447,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       ) : isPresenter ? (
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-slate-950">本轮</p>
-            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
-          </div>
-
           <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
             <div className="flex items-center justify-between gap-3">
               <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
@@ -2508,6 +2532,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
                   按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 预览玩家视角
                 </p>
+              ) : canPreviewPresenterPlayerView ? (
+                <p className="rounded-md bg-white px-3 py-2 text-xs font-semibold text-[var(--muted)]">
+                  按住 <kbd className="rounded border border-[var(--line)] bg-slate-50 px-1.5 py-0.5 text-slate-900">V</kbd> 查看玩家视角
+                </p>
               ) : null}
               <Button type="button" onClick={handleSettleBuzzerRound} disabled={!canSettleBuzzerRound || isSettlingBuzzerRound}>
                 {isSettlingBuzzerRound ? "处理中..." : standardSettleActionText}
@@ -2520,11 +2548,6 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-slate-950">本轮</p>
-            <span className="rounded bg-slate-200 px-2 py-1 text-xs font-bold text-slate-700">{standardModeLabel}</span>
-          </div>
-
           <section className={["rounded-md border p-4", standardTaskTone].join(" ")}>
             <div className="flex items-center justify-between gap-3">
               <span className="rounded bg-slate-900 px-2 py-1 text-xs font-bold text-white">{standardTaskBadge}</span>
@@ -2598,10 +2621,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                     : isBuzzerMode
                       ? "提交抢答（回车）"
                       : myHasForfeited
-                        ? "提交答案"
+                        ? "提交答案（回车）"
                         : myAnswer
-                          ? "修改答案"
-                          : "提交答案"}
+                          ? "修改答案（回车）"
+                          : "提交答案（回车）"}
                 </Button>
                 {!isTeamBattleMode ? (
                   <Button
@@ -2731,7 +2754,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
         {actionPanel}
       </div>
 
-      {isPresenter && isRevealPreviewOpen && canRenderPortal
+      {isPresenter && currentQuestion && isRevealPreviewOpen && canRenderPortal
         ? createPortal(
             <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6">
               <div
@@ -2743,7 +2766,7 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 }}
               >
                 <img alt="" className="h-full w-full object-cover" src={currentQuestion.imageUrl} />
-                {canPreviewSelectedBlocks ? (
+                {canPreviewPresenterPlayerView ? (
                   <div
                     className="absolute inset-0 grid"
                     style={{
