@@ -1173,13 +1173,13 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
   const rankedNextScore = Math.max(1, guessers.length - questionResults.length);
   const scoreCardLabel =
     gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
-      ? "答对分数"
+      ? "抢答规则"
       : gameSession?.gameMode === "BUZZER_RANKED"
-        ? "下一名分数"
+        ? "答对得分"
         : "本轮分数";
   const scoreCardValue =
     gameSession?.gameMode === "BUZZER_FIRST_CORRECT"
-      ? "1 分"
+      ? "首个答对 +1"
       : gameSession?.gameMode === "BUZZER_RANKED"
         ? `${rankedNextScore} 分`
         : `${currentScore} 分`;
@@ -1939,6 +1939,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
 
   const currentPlayerName = room.players.find((player) => player.id === playerId)?.nickname ?? "未设置昵称";
   const playingGridClass = "grid gap-4 lg:grid-cols-6";
+  const gameModeCardValue =
+    gameSession.gameMode === "ROUND_REVEAL"
+      ? "个人 · 标准模式"
+      : gameSession.gameMode === "BUZZER_FIRST_CORRECT"
+        ? "个人 · 抢答模式"
+        : gameSession.gameMode === "BUZZER_RANKED"
+          ? "个人 · 顺位得分模式"
+          : "团队 · 对抗模式";
+  const revealedBlocksCardValue = `${revealedBlockSet.size} / ${TOTAL_BLOCKS} 格`;
+  const teamBattleScoreCardValue = teamBattleState
+    ? `红队 ${teamBattleState.teamScores.red} : ${teamBattleState.teamScores.blue} 蓝队`
+    : "";
+  const teamBattleActionCardValue = teamBattleState
+    ? teamBattleState.phase === "JUDGING"
+      ? "裁判判定"
+      : teamBattleState.phase === "REVIEW"
+        ? "复盘"
+        : `${getTeamName(teamBattleActiveTeam)} · ${teamBattlePhaseLabel}`
+    : "";
 
   const scorePanel = (
     <div className="rounded-md border border-[var(--line)] bg-white p-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
@@ -2677,35 +2696,26 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">游戏模式</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">{gameModeCardValue}</p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
               <p className="text-[var(--muted)]">当前题号</p>
               <p className="mt-1 text-lg font-semibold text-slate-950">
                 {gameSession.currentQuestionIndex + 1} / {questions.length}
               </p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">对抗回合</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">第 {teamBattleState.turnNumber} 回合</p>
+              <p className="text-[var(--muted)]">比分</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">{teamBattleScoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">当前阶段</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">{teamBattlePhaseLabel}</p>
+              <p className="text-[var(--muted)]">当前行动</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">{teamBattleActionCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">行动队伍</p>
-              <p className={["mt-1 text-lg font-bold", teamBattleActiveTone.text].join(" ")}>
-                {getTeamName(teamBattleActiveTeam)}
-              </p>
-            </div>
-            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">投票</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">
-                {teamBattleState.phase === "JUDGING" || teamBattleState.phase === "REVIEW"
-                  ? "已结算"
-                  : `${teamBattleSubmittedCount} / ${teamBattleVoteTotal}`}
-              </p>
-              {teamBattleVoteSeconds !== null && canSeeTeamBattleCountdown ? (
-                <p className="mt-1 text-xs font-semibold text-amber-700">{teamBattleVoteSeconds} 秒</p>
-              ) : null}
+              <p className="text-[var(--muted)]">已揭露</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
             </div>
           </>
         ) : (
@@ -2717,6 +2727,10 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
                 {currentPlayerName}
                 {playerId === room.hostPlayerId ? <span className="ml-2 rounded bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">房主</span> : null}
               </p>
+            </div>
+            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
+              <p className="text-[var(--muted)]">游戏模式</p>
+              <p className="mt-1 truncate text-lg font-semibold text-slate-950">{gameModeCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
               <p className="text-[var(--muted)]">当前题号</p>
@@ -2735,14 +2749,8 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
               <p className="mt-1 text-lg font-semibold text-slate-950">{scoreCardValue}</p>
             </div>
             <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">倒计时</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">{remainingSeconds} 秒</p>
-            </div>
-            <div className="rounded-md border border-[var(--line)] bg-slate-50 p-3">
-              <p className="text-[var(--muted)]">已答对</p>
-              <p className="mt-1 text-lg font-semibold text-slate-950">
-                {questionResults.length} / {guessers.length}
-              </p>
+              <p className="text-[var(--muted)]">已揭露</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">{revealedBlocksCardValue}</p>
             </div>
           </>
         )}
