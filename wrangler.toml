@@ -18,7 +18,7 @@ database_id = "bdc89668-68ab-48bd-968b-ebcc40367da2"
 migrations_dir = "d1/migrations"
 
 [vars]
-ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
+ALLOWED_ORIGIN = "anime-master-game-v2.monight.dpdns.org,http://localhost:3000,http://127.0.0.1:3000"
 CLOUDINARY_CLOUD_NAME = "dfdfibosf"
 CLOUDINARY_FOLDER = "anime-master-game"
 CLOUDINARY_EXISTING_IMAGE_LIMIT = "50"

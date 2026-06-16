@@ -527,6 +527,25 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
     [applyRoundSnapshot],
   );
 
+  const catchUpRoundSnapshot = useCallback(() => {
+    if (!room.currentGameId) {
+      return;
+    }
+
+    getRoundSnapshot(room.currentGameId)
+      .then((snapshot) => {
+        if (snapshot.gameSession.id !== room.currentGameId) {
+          return;
+        }
+
+        applyRoundSnapshot(snapshot);
+        setImageLoadFailed(false);
+      })
+      .catch((error) => {
+        onError(error instanceof Error ? error.message : "同步游戏快照失败。");
+      });
+  }, [applyRoundSnapshot, onError, room.currentGameId]);
+
   const applyRoundSnapshotFromResult = useCallback(
     (result: unknown) => {
       const snapshot = getRoundSnapshotFromValue(result);
@@ -621,129 +640,144 @@ export function ImageRevealGame({ room, playerId, isPresenter, onError, onRoomUp
       return;
     }
 
-    return subscribeRealtimeTopic(`room:${room.id}`, (message) => {
-      const currentGameSession = gameSessionRef.current;
-      let handled = false;
+    return subscribeRealtimeTopic(
+      `room:${room.id}`,
+      (message) => {
+        const currentGameSession = gameSessionRef.current;
+        let handled = false;
 
-      for (const delta of getRealtimeDeltas(message)) {
-        if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
-          onRoomUpdated?.(delta.room);
-          handled = true;
-          continue;
-        }
+        for (const delta of getRealtimeDeltas(message)) {
+          if (delta.scope === "room" && delta.type === "room_updated" && delta.room.id === room.id) {
+            onRoomUpdated?.(delta.room);
+            handled = true;
+            continue;
+          }
 
-        if (delta.scope === "game" && delta.type === "question_label_updated") {
-          setQuestions((currentQuestions) =>
-            currentQuestions.map((question) => (question.id === delta.question.id ? delta.question : question)),
-          );
-          handled = true;
-          continue;
-        }
+          if (delta.scope === "game" && delta.type === "question_label_updated") {
+            setQuestions((currentQuestions) =>
+              currentQuestions.map((question) => (question.id === delta.question.id ? delta.question : question)),
+            );
+            handled = true;
+            continue;
+          }
 
-        if (delta.scope === "game" && delta.type === "round_snapshot" && delta.snapshot.gameSession.id === room.currentGameId) {
-          applyRoundSnapshot(delta.snapshot);
-          setImageLoadFailed(false);
-          setSelectedBlocks([]);
-          handled = true;
-          continue;
-        }
+          if (delta.scope === "game" && delta.type === "round_snapshot" && delta.snapshot.gameSession.id === room.currentGameId) {
+            applyRoundSnapshot(delta.snapshot);
+            setImageLoadFailed(false);
+            setSelectedBlocks([]);
+            handled = true;
+            continue;
+          }
 
-        if (delta.scope === "game" && delta.type === "game_session_updated" && delta.gameSession.id === room.currentGameId) {
-          applyGameSessionDelta(delta.gameSession);
-          setImageLoadFailed(false);
-          setSelectedBlocks([]);
-          handled = true;
-          continue;
-        }
+          if (delta.scope === "game" && delta.type === "game_session_updated" && delta.gameSession.id === room.currentGameId) {
+            applyGameSessionDelta(delta.gameSession);
+            setImageLoadFailed(false);
+            setSelectedBlocks([]);
+            handled = true;
+            continue;
+          }
 
-        if (delta.scope === "game" && delta.type === "answer_canceled" && delta.gameSession.id === room.currentGameId) {
-          applyGameSessionDelta(delta.gameSession);
-          setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
-          setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
-          handled = true;
-          continue;
-        }
+          if (delta.scope === "game" && delta.type === "answer_canceled" && delta.gameSession.id === room.currentGameId) {
+            applyGameSessionDelta(delta.gameSession);
+            setAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
+            setLabelAnswers((currentAnswers) => currentAnswers.filter((answer) => answer.id !== delta.canceledAnswerId));
+            handled = true;
+            continue;
+          }
 
-        if (delta.scope === "game" && delta.type === "answer_submitted" && currentGameSession?.id === delta.answer.gameSessionId) {
-          if (
-            delta.answer.questionIndex === currentGameSession.currentQuestionIndex &&
-            delta.answer.revealRound === currentGameSession.currentRevealRound
-          ) {
-            setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
-            if (isPresenter && !isForfeitAnswer(delta.answer)) {
-              setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
-              showAnswerBubble(delta.answer);
-            }
-            if (isForfeitAnswer(delta.answer)) {
-              setBuzzerAnswers((currentAnswers) =>
-                currentAnswers.filter(
-                  (answer) =>
-                    !(
-                      answer.gameSessionId === delta.answer.gameSessionId &&
-                      answer.questionIndex === delta.answer.questionIndex &&
-                      answer.revealRound === delta.answer.revealRound &&
-                      answer.playerId === delta.answer.playerId
-                    ),
-                ),
-              );
-            }
-            if (delta.answer.playerId === playerId) {
-              setMyAnswer(delta.answer);
+          if (delta.scope === "game" && delta.type === "answer_submitted" && currentGameSession?.id === delta.answer.gameSessionId) {
+            if (
+              delta.answer.questionIndex === currentGameSession.currentQuestionIndex &&
+              delta.answer.revealRound === currentGameSession.currentRevealRound
+            ) {
+              setAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
+              if (isPresenter && !isForfeitAnswer(delta.answer)) {
+                setLabelAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.answer));
+                showAnswerBubble(delta.answer);
+              }
               if (isForfeitAnswer(delta.answer)) {
-                setMyBuzzerAnswer(null);
+                setBuzzerAnswers((currentAnswers) =>
+                  currentAnswers.filter(
+                    (answer) =>
+                      !(
+                        answer.gameSessionId === delta.answer.gameSessionId &&
+                        answer.questionIndex === delta.answer.questionIndex &&
+                        answer.revealRound === delta.answer.revealRound &&
+                        answer.playerId === delta.answer.playerId
+                      ),
+                  ),
+                );
+              }
+              if (delta.answer.playerId === playerId) {
+                setMyAnswer(delta.answer);
+                if (isForfeitAnswer(delta.answer)) {
+                  setMyBuzzerAnswer(null);
+                }
               }
             }
+            handled = true;
+            continue;
           }
-          handled = true;
-          continue;
-        }
 
-        if (
-          delta.scope === "game" &&
-          delta.type === "buzzer_answer_submitted" &&
-          currentGameSession?.id === delta.buzzerAnswer.gameSessionId
-        ) {
           if (
-            delta.buzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
-            delta.buzzerAnswer.revealRound === currentGameSession.currentRevealRound
+            delta.scope === "game" &&
+            delta.type === "buzzer_answer_submitted" &&
+            currentGameSession?.id === delta.buzzerAnswer.gameSessionId
           ) {
+            if (
+              delta.buzzerAnswer.questionIndex === currentGameSession.currentQuestionIndex &&
+              delta.buzzerAnswer.revealRound === currentGameSession.currentRevealRound
+            ) {
+              setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
+              if (delta.buzzerAnswer.playerId === playerId) {
+                setMyBuzzerAnswer(delta.buzzerAnswer);
+              }
+            }
+            handled = true;
+            continue;
+          }
+
+          if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
+            applyGameSessionDelta(delta.gameSession);
             setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
             if (delta.buzzerAnswer.playerId === playerId) {
               setMyBuzzerAnswer(delta.buzzerAnswer);
             }
+            handled = true;
           }
-          handled = true;
-          continue;
         }
 
-        if (delta.scope === "game" && delta.type === "buzzer_answer_judged" && delta.gameSession.id === room.currentGameId) {
-          applyGameSessionDelta(delta.gameSession);
-          setBuzzerAnswers((currentAnswers) => upsertBySubmittedAt(currentAnswers, delta.buzzerAnswer));
-          if (delta.buzzerAnswer.playerId === playerId) {
-            setMyBuzzerAnswer(delta.buzzerAnswer);
-          }
-          handled = true;
+        if (handled) {
+          return;
         }
-      }
 
-      if (handled) {
-        return;
-      }
+        const pushedRoundSnapshot = getBroadcastRoundSnapshot(message);
+        if (pushedRoundSnapshot && pushedRoundSnapshot.gameSession.id === room.currentGameId) {
+          applyRoundSnapshot(pushedRoundSnapshot);
+          return;
+        }
 
-      const pushedRoundSnapshot = getBroadcastRoundSnapshot(message);
-      if (pushedRoundSnapshot && pushedRoundSnapshot.gameSession.id === room.currentGameId) {
-        applyRoundSnapshot(pushedRoundSnapshot);
-        return;
-      }
-
-      const pushedGameSession = getBroadcastGameSession(message.result);
-      if (pushedGameSession && pushedGameSession.id === room.currentGameId) {
-        refreshRoundData(pushedGameSession).catch((error) => {
-          onError(error instanceof Error ? error.message : "同步游戏快照失败。");
-        });
-      }
-    });
-  }, [applyRoundSnapshot, isPresenter, onError, onRoomUpdated, playerId, refreshRoundData, room.currentGameId, room.id, showAnswerBubble]);
+        const pushedGameSession = getBroadcastGameSession(message.result);
+        if (pushedGameSession && pushedGameSession.id === room.currentGameId) {
+          refreshRoundData(pushedGameSession).catch((error) => {
+            onError(error instanceof Error ? error.message : "同步游戏快照失败。");
+          });
+        }
+      },
+      { onOpen: catchUpRoundSnapshot },
+    );
+  }, [
+    applyRoundSnapshot,
+    catchUpRoundSnapshot,
+    isPresenter,
+    onError,
+    onRoomUpdated,
+    playerId,
+    refreshRoundData,
+    room.currentGameId,
+    room.id,
+    showAnswerBubble,
+  ]);
 
   useEffect(() => {
     if (!room.id || !room.currentGameId) {

@@ -108,6 +108,7 @@ function corsHeaders(request: Request, env: Env) {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "content-type",
     "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
   };
 }
 
@@ -116,6 +117,7 @@ function json(data: unknown, init: ResponseInit = {}, request: Request, env: Env
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
       ...corsHeaders(request, env),
       ...init.headers,
     },
@@ -227,6 +229,15 @@ function attachRoundSnapshot(result: unknown, roundSnapshot: RoundSnapshot | nul
     ...result,
     roundSnapshot,
   };
+}
+
+function stripRoundSnapshotFromBroadcastResult(result: unknown) {
+  if (!isRecord(result) || !("roundSnapshot" in result)) {
+    return result;
+  }
+
+  const { roundSnapshot: _roundSnapshot, ...broadcastResult } = result;
+  return broadcastResult;
 }
 
 function asRoom(value: unknown): Room | null {
@@ -405,13 +416,12 @@ async function handleRpc(request: Request, env: Env) {
         await broadcast(env, {
           type: "change",
           name,
-          result: responseResult,
+          result: stripRoundSnapshotFromBroadcastResult(responseResult),
           args,
           topic,
           clientActionId: body.clientActionId,
           delta: deltas[0],
           deltas,
-          roundSnapshot: roundSnapshot ?? undefined,
         });
       }
     }
@@ -518,6 +528,11 @@ export class RoomDurableObject {
       };
       clientActionId = payload.clientActionId;
 
+      if (payload.type === "ping") {
+        socket.send(JSON.stringify({ type: "pong" }));
+        return;
+      }
+
       if (payload.type !== "action" || !payload.name) {
         socket.send(JSON.stringify({ type: "error", error: "无效的实时操作请求。" }));
         return;
@@ -551,13 +566,12 @@ export class RoomDurableObject {
           JSON.stringify({
             type: "change",
             name: payload.name,
-            result: responseResult,
+            result: stripRoundSnapshotFromBroadcastResult(responseResult),
             args: payload.args ?? [],
             topic: "",
             clientActionId: payload.clientActionId,
             delta: deltas[0],
             deltas,
-            roundSnapshot: roundSnapshot ?? undefined,
           } satisfies BroadcastMessage),
         );
       }

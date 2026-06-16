@@ -1235,20 +1235,28 @@ export default function RoomPage({ initialRoomCode = "" }: { initialRoomCode?: s
       }
     }
 
-    const unsubscribe = subscribeRealtimeTopic(`room:${room.id}`, (message) => {
-      const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
-      if (dissolvedDelta?.roomId === room.id) {
-        markRoomDissolved();
-        return;
-      }
+    const unsubscribe = subscribeRealtimeTopic(
+      `room:${room.id}`,
+      (message) => {
+        const dissolvedDelta = getRealtimeDeltas(message).find(isRoomDissolvedDelta);
+        if (dissolvedDelta?.roomId === room.id) {
+          markRoomDissolved();
+          return;
+        }
 
-      const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
-      const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
-      if (pushedRoom && pushedRoom.id === room.id) {
-        applyRoomUpdate(pushedRoom);
-        return;
-      }
-    });
+        const roomDelta = getRealtimeDeltas(message).find(isRoomUpdatedDelta);
+        const pushedRoom = roomDelta?.room ?? getBroadcastRoom(message.result);
+        if (pushedRoom && pushedRoom.id === room.id) {
+          applyRoomUpdate(pushedRoom);
+          return;
+        }
+      },
+      {
+        onOpen: () => {
+          void refreshLatestRoom();
+        },
+      },
+    );
 
     void refreshLatestRoom();
     const catchUpTimer = window.setTimeout(() => {

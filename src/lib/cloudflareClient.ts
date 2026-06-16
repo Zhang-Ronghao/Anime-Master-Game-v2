@@ -25,13 +25,20 @@ type ActionResultMessage = {
 type TopicState = {
   socket: WebSocket | null;
   listeners: Set<(message: ChangeMessage) => void>;
+  connectListeners: Set<() => void>;
   pending: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number }>;
   reconnectTimer: number | null;
+  heartbeatTimer: number | null;
+  reconnectAttempts: number;
+  lastPongAt: number;
 };
 
 const ACTION_TIMEOUT_MS = 4000;
 const LONG_ACTION_TIMEOUT_MS = 30000;
-const RECONNECT_DELAY_MS = 500;
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 5000;
+const HEARTBEAT_INTERVAL_MS = 25000;
+const HEARTBEAT_TIMEOUT_MS = 70000;
 const ROOM_TOPIC_PREFIX = "room:";
 
 const MUTATION_NAMES = new Set([
@@ -125,10 +132,72 @@ function getActionTimeoutMs(name: string) {
 function getTopicState(topic: string) {
   let state = topicStates.get(topic);
   if (!state) {
-    state = { socket: null, listeners: new Set(), pending: new Map(), reconnectTimer: null };
+    state = {
+      socket: null,
+      listeners: new Set(),
+      connectListeners: new Set(),
+      pending: new Map(),
+      reconnectTimer: null,
+      heartbeatTimer: null,
+      reconnectAttempts: 0,
+      lastPongAt: Date.now(),
+    };
     topicStates.set(topic, state);
   }
   return state;
+}
+
+function getReconnectDelayMs(state: TopicState) {
+  return Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, state.reconnectAttempts - 1));
+}
+
+function clearHeartbeat(state: TopicState) {
+  if (state.heartbeatTimer !== null) {
+    window.clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
+  }
+}
+
+function notifyConnectListeners(state: TopicState) {
+  for (const listener of Array.from(state.connectListeners)) {
+    try {
+      listener();
+    } catch (error) {
+      console.error("Realtime connect listener failed.", error);
+    }
+  }
+}
+
+function notifyChangeListeners(state: TopicState, message: ChangeMessage) {
+  for (const listener of Array.from(state.listeners)) {
+    try {
+      listener(message);
+    } catch (error) {
+      console.error("Realtime change listener failed.", error);
+    }
+  }
+}
+
+function startHeartbeat(topic: string, state: TopicState, socket: WebSocket) {
+  clearHeartbeat(state);
+  state.lastPongAt = Date.now();
+  state.heartbeatTimer = window.setInterval(() => {
+    if (state.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+      clearHeartbeat(state);
+      return;
+    }
+
+    if (Date.now() - state.lastPongAt > HEARTBEAT_TIMEOUT_MS) {
+      socket.close(4000, "Heartbeat timeout.");
+      return;
+    }
+
+    try {
+      socket.send(JSON.stringify({ type: "ping", topic }));
+    } catch {
+      socket.close(1011, "Heartbeat send failed.");
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 function scheduleReconnect(topic: string, state: TopicState) {
@@ -141,7 +210,7 @@ function scheduleReconnect(topic: string, state: TopicState) {
     if (state.listeners.size > 0) {
       ensureSocket(topic);
     }
-  }, RECONNECT_DELAY_MS);
+  }, getReconnectDelayMs(state));
 }
 
 function ensureSocket(topic: string) {
@@ -159,8 +228,30 @@ function ensureSocket(topic: string) {
   const socket = new WebSocket(wsUrl(`/api/realtime/${encodeURIComponent(topic)}/ws`));
   state.socket = socket;
 
+  socket.onopen = () => {
+    if (state.socket !== socket) {
+      return;
+    }
+
+    state.reconnectAttempts = 0;
+    startHeartbeat(topic, state, socket);
+    notifyConnectListeners(state);
+  };
+
   socket.onmessage = (event) => {
-    const message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
+    let message: ChangeMessage | ActionResultMessage | { type?: string };
+
+    try {
+      message = JSON.parse(String(event.data)) as ChangeMessage | ActionResultMessage | { type?: string };
+    } catch (error) {
+      console.error("Realtime message parse failed.", error);
+      return;
+    }
+
+    if (message.type === "pong" || message.type === "connected") {
+      state.lastPongAt = Date.now();
+      return;
+    }
 
     if (message.type === "action_result") {
       const result = message as ActionResultMessage;
@@ -178,9 +269,8 @@ function ensureSocket(topic: string) {
     }
 
     if (message.type === "change") {
-      for (const listener of state.listeners) {
-        listener(message as ChangeMessage);
-      }
+      state.lastPongAt = Date.now();
+      notifyChangeListeners(state, message as ChangeMessage);
     }
   };
 
@@ -189,12 +279,14 @@ function ensureSocket(topic: string) {
       return;
     }
 
+    clearHeartbeat(state);
     for (const pending of state.pending.values()) {
       window.clearTimeout(pending.timer);
       pending.reject(new Error("实时连接已断开，本次操作没有完成。请重试。"));
     }
     state.pending.clear();
     state.socket = null;
+    state.reconnectAttempts += 1;
     scheduleReconnect(topic, state);
   };
 
@@ -271,7 +363,17 @@ async function wsAction<T>(topic: string, name: string, args: unknown[]) {
     });
   });
 
-  socket.send(JSON.stringify({ type: "action", name, args, clientActionId }));
+  try {
+    socket.send(JSON.stringify({ type: "action", name, args, clientActionId }));
+  } catch {
+    const pending = state.pending.get(clientActionId);
+    if (pending) {
+      window.clearTimeout(pending.timer);
+      state.pending.delete(clientActionId);
+    }
+    throw new Error("实时操作发送失败，请检查网络后重试。");
+  }
+
   return promise;
 }
 
@@ -286,18 +388,37 @@ export async function callGameRpc<T>(name: string, args: unknown[] = []) {
   return httpRpc<T>(name, args);
 }
 
-export function subscribeRealtimeTopic(topic: string, listener: (message: ChangeMessage) => void) {
+export function subscribeRealtimeTopic(
+  topic: string,
+  listener: (message: ChangeMessage) => void,
+  options: { onOpen?: () => void } = {},
+) {
   const state = getTopicState(topic);
+  const onOpen = options.onOpen;
   state.listeners.add(listener);
+  if (onOpen) {
+    state.connectListeners.add(onOpen);
+  }
   ensureSocket(topic);
+  if (onOpen && state.socket?.readyState === WebSocket.OPEN) {
+    window.setTimeout(() => {
+      if (state.connectListeners.has(onOpen)) {
+        onOpen();
+      }
+    }, 0);
+  }
 
   return () => {
     state.listeners.delete(listener);
-    if (state.listeners.size === 0 && state.pending.size === 0) {
+    if (onOpen) {
+      state.connectListeners.delete(onOpen);
+    }
+    if (state.listeners.size === 0 && state.pending.size === 0 && state.connectListeners.size === 0) {
       if (state.reconnectTimer !== null) {
         window.clearTimeout(state.reconnectTimer);
         state.reconnectTimer = null;
       }
+      clearHeartbeat(state);
       state.socket?.close(1000, "No listeners.");
       state.socket = null;
       topicStates.delete(topic);
