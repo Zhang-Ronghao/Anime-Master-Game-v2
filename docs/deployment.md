@@ -238,7 +238,7 @@ NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your-cloud-name
 NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your-unsigned-upload-preset
 ```
 
-如果已经配置了自定义域名同源 `/api/*`，`NEXT_PUBLIC_API_BASE_URL` 可以留空，这样 Pages 只需要填 Cloudinary 的两个变量。
+如果已经配置了自定义域名同源 `/api/*`，删除 `NEXT_PUBLIC_API_BASE_URL`，不要保留空值。这样 Pages 只需要填 Cloudinary 的两个变量。
 
 其他前端上传参数已有默认值，通常不用填：
 
@@ -312,10 +312,21 @@ Route pattern：
 game.example.com/api/*
 ```
 
-3. Pages 环境变量改成：
+3. 删除 Pages 环境变量：
+
+在 Pages 项目的 `Settings -> Environment variables` 里删除 `NEXT_PUBLIC_API_BASE_URL`。
+
+如果 Cloudflare Pages 界面或现有流程必须保留这个变量，就填自定义域名的 origin，不要带 `/api`：
 
 ```env
-NEXT_PUBLIC_API_BASE_URL=
+NEXT_PUBLIC_API_BASE_URL=https://game.example.com
+```
+
+不要填：
+
+```env
+NEXT_PUBLIC_API_BASE_URL=https://game.example.com/api
+NEXT_PUBLIC_API_BASE_URL=/api
 ```
 
 保存后，在 Pages 的 `Deployments` 里重新运行最近一次 Git deployment。
@@ -446,9 +457,10 @@ ALLOWED_ORIGIN = "https://anime-master-game-v2.pages.dev"
 第二，Pages 的 `NEXT_PUBLIC_API_BASE_URL`：
 
 - 跨域 Worker 模式：填 Worker 地址。
-- 同源 `/api/*` 模式：留空。
+- 同源 `/api/*` 模式：删除这个环境变量。
+- 如果界面或流程必须保留变量：填自定义域名 origin，例如 `https://game.example.com`，不要带 `/api`。
 - 不要填 `localhost`。
-- 不要填 Pages 地址。
+- 跨域 Worker 模式不要填 Pages 地址；同源模式只在必须保留变量时填自定义域名 origin。
 
 改完 Worker 配置后执行：
 

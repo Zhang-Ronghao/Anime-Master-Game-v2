@@ -34,5 +34,5 @@ Deployment checklist:
 2. Put the generated `database_id` into `wrangler.toml`
 3. `npm run d1:migrate:remote`
 4. `npm run worker:deploy`
-5. Set `NEXT_PUBLIC_API_BASE_URL=<Worker URL>` in Cloudflare Pages
+5. Set `NEXT_PUBLIC_API_BASE_URL=<Worker URL>` in Cloudflare Pages for cross-origin Worker API, or delete `NEXT_PUBLIC_API_BASE_URL` when using same-origin custom-domain `/api/*`
 6. Deploy the frontend build output directory `pages-dist`
